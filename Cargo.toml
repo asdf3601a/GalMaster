@@ -1,0 +1,56 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/galmaster-core",
+    "crates/galmaster-capture",
+    "crates/galmaster-provider",
+    "crates/galmaster-extract",
+    "crates/galmaster-understand",
+    "crates/galmaster-translate",
+    "crates/galmaster-obs",
+    "crates/galmaster-ui",
+    "crates/galmaster",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+authors = ["GalMaster"]
+repository = "https://github.com/example/GalMaster"
+
+[workspace.dependencies]
+galmaster-core = { path = "crates/galmaster-core" }
+galmaster-capture = { path = "crates/galmaster-capture" }
+galmaster-provider = { path = "crates/galmaster-provider" }
+galmaster-extract = { path = "crates/galmaster-extract" }
+galmaster-understand = { path = "crates/galmaster-understand" }
+galmaster-translate = { path = "crates/galmaster-translate" }
+galmaster-obs = { path = "crates/galmaster-obs" }
+galmaster-ui = { path = "crates/galmaster-ui" }
+
+anyhow = "1"
+async-trait = "0.1"
+axum = { version = "0.8", features = ["ws"] }
+base64 = "0.22"
+chrono = { version = "0.4", features = ["serde"] }
+dirs = "6"
+eframe = { version = "0.31", default-features = true }
+egui = "0.31"
+futures = "0.3"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream", "multipart"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "fs", "io-util", "net"] }
+tokio-util = { version = "0.7", features = ["rt"] }
+toml = "0.8"
+tower-http = { version = "0.6", features = ["cors", "fs"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+xcap = "0.9"
+clap = { version = "4", features = ["derive"] }
+strsim = "0.11"
+bytes = "1"

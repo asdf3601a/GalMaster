@@ -1,0 +1,15 @@
+[package]
+name = "galmaster-translate"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Text translation backends (OpenAI / Anthropic compatible)"
+
+[dependencies]
+galmaster-core.workspace = true
+galmaster-provider = { path = "../galmaster-provider" }
+anyhow.workspace = true
+async-trait.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+tracing.workspace = true

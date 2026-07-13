@@ -1,0 +1,162 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8" />
+  <title>GalMaster OBS Overlay</title>
+  <style>
+    :root {
+      --font-family: "Noto Sans CJK TC", "Microsoft YaHei", sans-serif;
+      --font-size: 42px;
+      --orig-font-size: 22px;
+      --color: #ffffffff;
+      --bg: #00000099;
+      --outline: 0px;
+      --outline-color: #000000ff;
+      --align: center;
+      --line-height: 1.25;
+    }
+    html, body {
+      margin: 0;
+      padding: 0;
+      width: 100%;
+      height: 100%;
+      background: transparent !important;
+      overflow: hidden;
+      font-family: var(--font-family);
+    }
+    #wrap {
+      position: absolute;
+      left: 0; right: 0; bottom: 8%;
+      display: flex;
+      justify-content: center;
+      pointer-events: none;
+      padding: 0 4%;
+    }
+    #box {
+      max-width: 92%;
+      padding: 0.35em 0.75em;
+      border-radius: 8px;
+      background: var(--bg);
+      text-align: var(--align);
+      line-height: var(--line-height);
+    }
+    .outlined {
+      color: var(--color);
+      font-size: var(--font-size);
+      font-weight: 600;
+      /* stroke only when --outline > 0 (set from style JSON) */
+      -webkit-text-stroke: var(--outline) var(--outline-color);
+      paint-order: stroke fill;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+    .outlined.has-outline {
+      text-shadow:
+        0 0 calc(var(--outline) * 1.2) var(--outline-color);
+    }
+    #original {
+      font-size: var(--orig-font-size);
+      opacity: 0.85;
+      margin-bottom: 0.25em;
+    }
+    #translated {
+      font-size: var(--font-size);
+    }
+    .hidden { display: none; }
+  </style>
+</head>
+<body>
+  <div id="wrap">
+    <div id="box">
+      <div id="original" class="outlined hidden"></div>
+      <div id="translated" class="outlined"></div>
+    </div>
+  </div>
+  <script>
+    const origEl = document.getElementById('original');
+    const trEl = document.getElementById('translated');
+    let showOriginal = false;
+    let showTranslated = true;
+
+    function systemFontStack(userFamily) {
+      const sys = '"Segoe UI", "Microsoft YaHei", "Microsoft JhengHei", "Noto Sans CJK TC", "Noto Sans CJK SC", "PingFang TC", sans-serif';
+      const f = (userFamily || '').trim();
+      if (!f || f.toLowerCase() === 'system') return sys;
+      return `"${f}", ${sys}`;
+    }
+
+    function applyStyle(style, fontUrl) {
+      const root = document.documentElement.style;
+      root.setProperty('--font-family', systemFontStack(style.font_family));
+      if (style.font_size_px) root.setProperty('--font-size', style.font_size_px + 'px');
+      if (style.original_font_size_px) root.setProperty('--orig-font-size', style.original_font_size_px + 'px');
+      if (style.color) root.setProperty('--color', style.color);
+      // background includes alpha (#RRGGBBAA) → box transparency
+      if (style.background) root.setProperty('--bg', style.background);
+      const ol = Number(style.outline_px) || 0;
+      // 0 must disable stroke — browsers still paint a hairline if left as "0px" sometimes
+      root.setProperty('--outline', ol > 0.05 ? (ol + 'px') : '0px');
+      if (style.outline_color) root.setProperty('--outline-color', style.outline_color);
+      if (style.line_height) root.setProperty('--line-height', style.line_height);
+      if (style.align) root.setProperty('--align', style.align);
+      showOriginal = !!style.show_original;
+      showTranslated = style.show_translated !== false;
+      origEl.classList.toggle('hidden', !showOriginal);
+      trEl.classList.toggle('hidden', !showTranslated);
+      origEl.classList.toggle('has-outline', ol > 0.05);
+      trEl.classList.toggle('has-outline', ol > 0.05);
+      if (ol <= 0.05) {
+        root.setProperty('--outline', '0px');
+        origEl.style.webkitTextStroke = '0';
+        trEl.style.webkitTextStroke = '0';
+      } else {
+        origEl.style.webkitTextStroke = '';
+        trEl.style.webkitTextStroke = '';
+      }
+
+      if (fontUrl) {
+        const id = 'gm-font';
+        let el = document.getElementById(id);
+        if (!el) {
+          el = document.createElement('style');
+          el.id = id;
+          document.head.appendChild(el);
+        }
+        const fam = (style.font_family && style.font_family.toLowerCase() !== 'system')
+          ? style.font_family
+          : 'GalMasterCustom';
+        el.textContent = `
+          @font-face {
+            font-family: "${fam}";
+            src: url("${fontUrl}?t=${Date.now()}") format("truetype");
+            font-display: swap;
+          }`;
+        // custom first, then system fallbacks
+        root.setProperty('--font-family', `"${fam}", ${systemFontStack('System')}`);
+      }
+    }
+
+    function connect() {
+      const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+      const ws = new WebSocket(`${proto}://${location.host}/ws`);
+      ws.onmessage = (ev) => {
+        let msg;
+        try { msg = JSON.parse(ev.data); } catch { return; }
+        if (msg.type === 'subtitle') {
+          origEl.textContent = msg.original || '';
+          trEl.textContent = msg.translated || '';
+          origEl.classList.toggle('hidden', !showOriginal || !msg.original);
+          trEl.classList.toggle('hidden', !showTranslated);
+        } else if (msg.type === 'style') {
+          applyStyle(msg.style || {}, msg.font_url);
+        }
+      };
+      ws.onclose = () => setTimeout(connect, 1500);
+      ws.onerror = () => ws.close();
+    }
+
+    fetch('/api/style').then(r => r.json()).then(s => applyStyle(s, s.font_path ? '/fonts/custom' : null)).catch(() => {});
+    connect();
+  </script>
+</body>
+</html>

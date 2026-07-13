@@ -1,0 +1,24 @@
+[package]
+name = "galmaster-extract"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Text extractors: vision model and optional classic OCR"
+
+[features]
+default = []
+classic_ocr = []
+
+[dependencies]
+galmaster-core.workspace = true
+galmaster-provider = { path = "../galmaster-provider" }
+galmaster-capture = { path = "../galmaster-capture" }
+anyhow.workspace = true
+async-trait.workspace = true
+image.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+tracing.workspace = true
+uuid.workspace = true

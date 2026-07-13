@@ -1,0 +1,70 @@
+# Place next to galmaster / galmaster.exe as config.toml
+# (same folder as the running binary). Override with --config <path>.
+
+[capture]
+# title_contains | title_exact | executable
+match_mode = "title_contains"
+window_title_contains = ""
+roi = { x = 0.05, y = 0.78, w = 0.90, h = 0.18 }
+# Pipeline capture rate while running (frames offered to VLM gates).
+target_fps = 8
+# GUI live-preview refresh rate (independent of target_fps). Lower = less UI lag.
+preview_fps = 1.0
+# Scale after ROI crop for BOTH preview and recognition (1.0 = native crop).
+image_scale = 1.0
+# nearest | bilinear | bicubic | lanczos
+scale_filter = "bilinear"
+
+[pipeline]
+# VLM end-to-end only (image → original + translation)
+profile = "vision_e2e"
+
+[pipeline.translate]
+# target_lang is used by the VLM prompt
+target_lang = "zh-TW"
+max_context_lines = 3
+
+[pipeline.vision]
+provider = "openai_compat"         # openai_compat | anthropic
+base_url = "https://api.openai.com/v1"
+model = "gpt-4o-mini"
+api_key_env = "GALMASTER_API_KEY"
+# api_key = ""
+
+[gate]
+pixel_diff_threshold = 0.01
+text_similarity_skip = 0.92
+stable_frames = 2
+
+[obs]
+bind = "127.0.0.1:8765"
+
+[overlay]
+# Floating subtitle window (OBS Browser Source is independent of this).
+enabled = true
+exclude_from_capture = false
+# chroma (default, OBS Color Key) | transparent (often fails on Windows GL)
+backdrop = "chroma"
+chroma_key = "#00FF00"
+# Floating overlay position (screen pixels); drag the overlay to change.
+pos_x = 200.0
+pos_y = 40.0
+width = 900.0
+height = 160.0
+
+[style]
+# "System" = OS font fallback (Segoe UI / YaHei / Noto …). Leave font_path empty.
+font_family = "System"
+# font_path = "C:\\Windows\\Fonts\\msyh.ttc"   # optional; still falls back to system fonts
+font_size_px = 42
+original_font_size_px = 22
+color = "#FFFFFFFF"
+# last two hex digits = alpha (99 ≈ 60% opacity). GUI has Background opacity slider.
+background = "#00000099"
+# 0 = no outline (recommended default). Small values (1–3) for stroke on chroma.
+outline_px = 0
+outline_color = "#000000FF"
+align = "center"
+line_height = 1.25
+show_original = false
+show_translated = true

@@ -1,0 +1,19 @@
+# Build
+/target/
+/dist/
+
+# Local / secrets
+.env
+config.local.toml
+/config.toml
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
+*.pdb
+**/*.rs.bk
+
+# Python / ML scratch
+.venv*/
+**/*.onnx

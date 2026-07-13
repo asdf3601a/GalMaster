@@ -1,0 +1,18 @@
+[package]
+name = "galmaster-understand"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Vision end-to-end subtitle understanding / translation"
+
+[dependencies]
+galmaster-core.workspace = true
+galmaster-provider = { path = "../galmaster-provider" }
+galmaster-capture = { path = "../galmaster-capture" }
+anyhow.workspace = true
+async-trait.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+tracing.workspace = true
