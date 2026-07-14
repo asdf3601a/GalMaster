@@ -51,8 +51,12 @@ repair = true
 json_object = false
 
 [gate]
+# Mean luma diff below this = "same frame" (skip / count toward stillness).
 pixel_diff_threshold = 0.01
+# After VLM: skip if original+translated is this similar to last accepted.
 text_similarity_skip = 0.92
+# Consecutive similar frames required before VLM (wait for stillness while animating).
+# 1 = fire on first novel frame; 2+ = debounce mid-animation.
 stable_frames = 2
 
 [obs]

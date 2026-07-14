@@ -2,12 +2,45 @@ use crate::types::Frame;
 use image::RgbaImage;
 use strsim::normalized_levenshtein;
 
-/// Skip model calls when ROI pixels barely change.
+/// Decision from [`FrameGate::evaluate`]: wait for stillness, then fire once.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FrameGateDecision {
+    /// Same (or near-same) as the last frame already sent to the model.
+    SkipUnchanged,
+    /// Scene changed but has not held still for `stable_frames` yet.
+    SkipStabilizing,
+    /// Novel + stable long enough — run the model.
+    Process,
+}
+
+impl FrameGateDecision {
+    pub fn should_process(self) -> bool {
+        matches!(self, Self::Process)
+    }
+
+    /// Short status line for the UI when not processing.
+    pub fn waiting_status(self) -> Option<&'static str> {
+        match self {
+            Self::SkipUnchanged => Some("Waiting — frame unchanged"),
+            Self::SkipStabilizing => Some("Waiting — frame stabilizing"),
+            Self::Process => None,
+        }
+    }
+}
+
+/// Wait for ROI stillness, then allow one model call per stable scene.
+///
+/// Unlike pure novelty detection, this **does not** fire on every pixel change.
+/// While the ROI is still animating, each distinct frame resets the stability
+/// counter; only after `stable_frames` consecutive similar samples (and different
+/// from the last processed scene) does [`FrameGateDecision::Process`] fire.
 #[derive(Debug, Clone)]
 pub struct FrameGate {
     pub pixel_diff_threshold: f32,
-    last_hash: Option<u64>,
-    last_sample: Option<Vec<u8>>,
+    pub stable_frames: u32,
+    last_processed: Option<Vec<u8>>,
+    pending: Option<Vec<u8>>,
+    pending_count: u32,
     sample_stride: u32,
 }
 
@@ -15,45 +48,82 @@ impl Default for FrameGate {
     fn default() -> Self {
         Self {
             pixel_diff_threshold: 0.01,
-            last_hash: None,
-            last_sample: None,
+            stable_frames: 2,
+            last_processed: None,
+            pending: None,
+            pending_count: 0,
             sample_stride: 8,
         }
     }
 }
 
 impl FrameGate {
-    pub fn new(pixel_diff_threshold: f32) -> Self {
+    pub fn new(pixel_diff_threshold: f32, stable_frames: u32) -> Self {
         Self {
             pixel_diff_threshold,
+            stable_frames: stable_frames.max(1),
             ..Default::default()
         }
     }
 
-    /// Returns true if the frame is novel enough to process.
-    pub fn should_process(&mut self, frame: &Frame) -> bool {
+    /// Evaluate whether this frame should trigger a model call.
+    pub fn evaluate(&mut self, frame: &Frame) -> FrameGateDecision {
         let sample = downsample_luma(&frame.image, self.sample_stride);
-        let hash = fnv1a64(&sample);
 
-        if let (Some(prev_hash), Some(prev_sample)) = (self.last_hash, self.last_sample.as_ref()) {
-            if prev_hash == hash {
-                return false;
-            }
-            let diff = mean_abs_diff(prev_sample, &sample);
-            if diff < self.pixel_diff_threshold {
-                return false;
+        if let Some(last) = &self.last_processed {
+            if samples_similar(last, &sample, self.pixel_diff_threshold) {
+                self.pending = None;
+                self.pending_count = 0;
+                return FrameGateDecision::SkipUnchanged;
             }
         }
 
-        self.last_hash = Some(hash);
-        self.last_sample = Some(sample);
-        true
+        if let Some(p) = &self.pending {
+            if samples_similar(p, &sample, self.pixel_diff_threshold) {
+                self.pending_count = self.pending_count.saturating_add(1);
+                self.pending = Some(sample.clone());
+                if self.pending_count >= self.stable_frames {
+                    self.last_processed = Some(sample);
+                    self.pending = None;
+                    self.pending_count = 0;
+                    return FrameGateDecision::Process;
+                }
+                return FrameGateDecision::SkipStabilizing;
+            }
+        }
+
+        // Novel vs pending (or no pending yet) — restart stillness window.
+        self.pending = Some(sample.clone());
+        self.pending_count = 1;
+        if self.stable_frames <= 1 {
+            self.last_processed = Some(sample);
+            self.pending = None;
+            self.pending_count = 0;
+            return FrameGateDecision::Process;
+        }
+        FrameGateDecision::SkipStabilizing
+    }
+
+    /// Convenience: true only when [`FrameGateDecision::Process`].
+    pub fn should_process(&mut self, frame: &Frame) -> bool {
+        self.evaluate(frame).should_process()
     }
 
     pub fn reset(&mut self) {
-        self.last_hash = None;
-        self.last_sample = None;
+        self.last_processed = None;
+        self.pending = None;
+        self.pending_count = 0;
     }
+}
+
+fn samples_similar(a: &[u8], b: &[u8], threshold: f32) -> bool {
+    if a == b {
+        return true;
+    }
+    if fnv1a64(a) == fnv1a64(b) {
+        return true;
+    }
+    mean_abs_diff(a, b) < threshold
 }
 
 /// Stabilize extracted text: require consensus frames + novelty vs last accepted.
@@ -263,21 +333,47 @@ mod tests {
     }
 
     #[test]
-    fn frame_gate_skips_identical() {
-        let mut gate = FrameGate::new(0.01);
-        let f1 = solid_frame([10, 20, 30, 255]);
-        let f2 = solid_frame([10, 20, 30, 255]);
-        assert!(gate.should_process(&f1));
-        assert!(!gate.should_process(&f2));
+    fn frame_gate_requires_stable_frames() {
+        let mut gate = FrameGate::new(0.01, 2);
+        let f = solid_frame([10, 20, 30, 255]);
+        assert_eq!(gate.evaluate(&f), FrameGateDecision::SkipStabilizing);
+        assert_eq!(gate.evaluate(&f), FrameGateDecision::Process);
+        assert_eq!(gate.evaluate(&f), FrameGateDecision::SkipUnchanged);
     }
 
     #[test]
-    fn frame_gate_accepts_change() {
-        let mut gate = FrameGate::new(0.01);
+    fn frame_gate_animation_resets_stability() {
+        let mut gate = FrameGate::new(0.01, 2);
+        let a = solid_frame([0, 0, 0, 255]);
+        let b = solid_frame([128, 128, 128, 255]);
+        let c = solid_frame([255, 255, 255, 255]);
+        assert_eq!(gate.evaluate(&a), FrameGateDecision::SkipStabilizing);
+        assert_eq!(gate.evaluate(&b), FrameGateDecision::SkipStabilizing);
+        assert_eq!(gate.evaluate(&c), FrameGateDecision::SkipStabilizing);
+        // Still never processed: need two matching C frames.
+        assert_eq!(gate.evaluate(&c), FrameGateDecision::Process);
+        assert_eq!(gate.evaluate(&c), FrameGateDecision::SkipUnchanged);
+    }
+
+    #[test]
+    fn frame_gate_new_scene_after_process() {
+        let mut gate = FrameGate::new(0.01, 2);
+        let a = solid_frame([0, 0, 0, 255]);
+        let b = solid_frame([255, 255, 255, 255]);
+        assert_eq!(gate.evaluate(&a), FrameGateDecision::SkipStabilizing);
+        assert_eq!(gate.evaluate(&a), FrameGateDecision::Process);
+        assert_eq!(gate.evaluate(&b), FrameGateDecision::SkipStabilizing);
+        assert_eq!(gate.evaluate(&b), FrameGateDecision::Process);
+    }
+
+    #[test]
+    fn frame_gate_stable_one_fires_immediately() {
+        let mut gate = FrameGate::new(0.01, 1);
         let f1 = solid_frame([0, 0, 0, 255]);
         let f2 = solid_frame([255, 255, 255, 255]);
-        assert!(gate.should_process(&f1));
-        assert!(gate.should_process(&f2));
+        assert_eq!(gate.evaluate(&f1), FrameGateDecision::Process);
+        assert_eq!(gate.evaluate(&f1), FrameGateDecision::SkipUnchanged);
+        assert_eq!(gate.evaluate(&f2), FrameGateDecision::Process);
     }
 
     #[test]

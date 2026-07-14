@@ -7,7 +7,7 @@ pub mod style;
 pub mod types;
 
 pub use config::Config;
-pub use gate::{FrameGate, ResultGate, TextGate};
+pub use gate::{FrameGate, FrameGateDecision, ResultGate, TextGate};
 pub use pipeline::{Pipeline, PipelineHandle};
 pub use style::SubtitleStyle;
 pub use types::*;

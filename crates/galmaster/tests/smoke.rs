@@ -40,15 +40,19 @@ fn style_color_parse() {
 
 #[test]
 fn gates_latest_wins_semantics() {
-    let mut fg = FrameGate::new(0.01);
+    let mut fg = FrameGate::new(0.01, 2);
     let mut tg = TextGate::new(0.92, 2);
     let mut rg = ResultGate::new(0.92);
 
     let f1 = solid(10, 20, 30);
     let f2 = solid(10, 20, 30);
     let f3 = solid(200, 200, 200);
-    assert!(fg.should_process(&f1));
+    // Wait for stillness: two similar frames before first process.
+    assert!(!fg.should_process(&f1));
+    assert!(fg.should_process(&f2));
     assert!(!fg.should_process(&f2));
+    // New scene needs two stable frames as well.
+    assert!(!fg.should_process(&f3));
     assert!(fg.should_process(&f3));
 
     assert!(tg.push("hello").is_none());

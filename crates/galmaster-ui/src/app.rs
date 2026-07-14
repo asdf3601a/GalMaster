@@ -844,6 +844,11 @@ impl GalMasterApp {
         );
         ui.add(
             egui::Slider::new(&mut self.config.gate.stable_frames, 1..=5).text("stable frames"),
+        )
+        .on_hover_text(
+            "Require N consecutive similar ROI frames before calling the VLM. \
+             While the scene is still animating (typing text, fades), the counter \
+             resets — only fires after the picture holds still. 1 = fire on first change.",
         );
     }
 

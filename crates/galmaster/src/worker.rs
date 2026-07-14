@@ -117,11 +117,13 @@ pub async fn run_worker(
                 let Some(frame) = handle.frames.take().await else {
                     continue;
                 };
-                if !gates.frame.should_process(&frame) {
-                    // Avoid spamming if already waiting.
-                    let s = handle.status_text();
-                    if !s.starts_with("Waiting") {
-                        handle.set_status("Waiting — frame unchanged");
+                let decision = gates.frame.evaluate(&frame);
+                if !decision.should_process() {
+                    if let Some(msg) = decision.waiting_status() {
+                        let s = handle.status_text();
+                        if s != msg {
+                            handle.set_status(msg);
+                        }
                     }
                     continue;
                 }

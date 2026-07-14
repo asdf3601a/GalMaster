@@ -171,7 +171,7 @@ pub struct GateBundle {
 impl GateBundle {
     pub fn from_config(cfg: &Config) -> Self {
         Self {
-            frame: FrameGate::new(cfg.gate.pixel_diff_threshold),
+            frame: FrameGate::new(cfg.gate.pixel_diff_threshold, cfg.gate.stable_frames),
             text: TextGate::new(cfg.gate.text_similarity_skip, cfg.gate.stable_frames),
             result: ResultGate::new(cfg.gate.text_similarity_skip),
         }
