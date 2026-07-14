@@ -106,9 +106,9 @@ TARGET_TABLE=$(cat <<'EOF'
 linux|x86_64-unknown-linux-gnu|galmaster|linux-x86_64|Linux x86_64 (glibc)
 linux-x64|x86_64-unknown-linux-gnu|galmaster|linux-x86_64|alias
 linux-arm64|aarch64-unknown-linux-gnu|galmaster|linux-aarch64|Linux aarch64 (glibc)
-windows|x86_64-pc-windows-msvc|galmaster.exe|windows|Windows x86_64 MSVC (recommended)
-win|x86_64-pc-windows-msvc|galmaster.exe|windows|alias
-windows-x64|x86_64-pc-windows-msvc|galmaster.exe|windows|alias
+windows|x86_64-pc-windows-msvc|galmaster.exe|windows-x86_64|Windows x86_64 MSVC (recommended)
+win|x86_64-pc-windows-msvc|galmaster.exe|windows-x86_64|alias
+windows-x64|x86_64-pc-windows-msvc|galmaster.exe|windows-x86_64|alias
 windows-gnu|x86_64-pc-windows-gnu|galmaster.exe|windows-gnu|Windows MinGW — do not ship
 macos|aarch64-apple-darwin|galmaster|macos-aarch64|macOS Apple Silicon
 macos-arm64|aarch64-apple-darwin|galmaster|macos-aarch64|alias
@@ -129,7 +129,7 @@ resolve_target() {
     case "$HOST_TRIPLE" in
       x86_64-unknown-linux-gnu)  dist=linux-x86_64 ;;
       aarch64-unknown-linux-gnu) dist=linux-aarch64 ;;
-      x86_64-pc-windows-msvc)    dist=windows ;;
+      x86_64-pc-windows-msvc)    dist=windows-x86_64 ;;
       x86_64-pc-windows-gnu)     dist=windows-gnu ;;
       aarch64-apple-darwin)      dist=macos-aarch64 ;;
       x86_64-apple-darwin)       dist=macos-x86_64 ;;

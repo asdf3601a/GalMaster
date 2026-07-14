@@ -1,13 +1,13 @@
 //! Capture loop + post-capture pipeline worker (vision-language e2e).
 
 use galmaster_capture::{capture_frame_scaled, CaptureTarget};
-use galmaster_core::config::{Config, LlmSamplingParams as CoreSampling};
+use galmaster_core::config::Config;
 use galmaster_core::pipeline::{apply_control, GateBundle, PipelineHandle};
 use galmaster_core::types::{
     ControlMessage, LatencyBreakdown, PipelineProfileKind, TranslationEvent, UnderstandContext,
 };
-use galmaster_provider::{LlmSamplingParams, ProviderConfig};
-use galmaster_understand::{VisionE2e, VisionUnderstanding};
+use galmaster_provider::{LlmSamplingExt, ProviderConfig};
+use galmaster_understand::{VisionE2e, VisionE2eOptions, VisionUnderstanding};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, Mutex};
@@ -227,19 +227,6 @@ fn push_context(lines: &mut Vec<String>, line: String, max: usize) {
     }
 }
 
-fn core_to_provider_sampling(s: &CoreSampling) -> LlmSamplingParams {
-    LlmSamplingParams {
-        temperature: s.temperature,
-        top_p: s.top_p,
-        top_k: s.top_k,
-        max_tokens: s.max_tokens,
-        frequency_penalty: s.frequency_penalty,
-        presence_penalty: s.presence_penalty,
-        seed: s.seed,
-        reasoning_effort: s.reasoning_effort.clone(),
-    }
-}
-
 fn build_vision(cfg: &Config) -> anyhow::Result<Box<dyn VisionUnderstanding>> {
     let key = Config::resolve_api_key(&cfg.pipeline.vision.api_key);
     if key.is_empty() {
@@ -259,31 +246,20 @@ fn build_vision(cfg: &Config) -> anyhow::Result<Box<dyn VisionUnderstanding>> {
         key,
         &cfg.pipeline.vision.model,
     );
-    let sampling = core_to_provider_sampling(&cfg.pipeline.vision.sampling);
+    let opts = VisionE2eOptions {
+        sampling: cfg.pipeline.vision.sampling.clone(),
+        structured: cfg.pipeline.vision.structured.clone(),
+    };
     debug!(
         model = %cfg.pipeline.vision.model,
-        sampling = %sampling.set_fields_summary(),
-        "vision sampling"
+        sampling = %opts.sampling.set_fields_summary(),
+        structured_repair = opts.structured.repair,
+        json_object = opts.structured.json_object,
+        "vision e2e options"
     );
-    let structured_repair = cfg.pipeline.vision.structured_repair;
-    let json_object_mode = cfg.pipeline.vision.json_object_mode;
-    debug!(
-        structured_repair,
-        json_object_mode, "vision structured output options"
-    );
-    if cfg.pipeline.vision.provider.contains("anthropic") {
-        Ok(Box::new(VisionE2e::anthropic(
-            pcfg,
-            sampling,
-            structured_repair,
-            json_object_mode,
-        )?))
-    } else {
-        Ok(Box::new(VisionE2e::openai(
-            pcfg,
-            sampling,
-            structured_repair,
-            json_object_mode,
-        )?))
-    }
+    Ok(Box::new(VisionE2e::from_provider_name(
+        &cfg.pipeline.vision.provider,
+        pcfg,
+        opts,
+    )?))
 }

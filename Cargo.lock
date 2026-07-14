@@ -1631,6 +1631,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "base64",
+ "galmaster-core",
  "reqwest",
  "serde",
  "serde_json",

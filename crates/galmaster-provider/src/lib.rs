@@ -10,6 +10,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tokio_util::sync::CancellationToken;
 
+// Re-export config types so call sites can use galmaster_provider::LlmSamplingParams.
+pub use galmaster_core::config::{normalize_api_key, LlmSamplingParams};
+
 #[derive(Debug, Clone)]
 pub struct ProviderConfig {
     pub base_url: String,
@@ -38,46 +41,23 @@ impl ProviderConfig {
     }
 }
 
-/// Trim and strip accidental `Bearer ` prefix from API keys.
-pub fn normalize_api_key(raw: impl AsRef<str>) -> String {
-    let s = raw.as_ref().trim();
-    let s = s
-        .strip_prefix("Bearer ")
-        .or_else(|| s.strip_prefix("bearer "))
-        .unwrap_or(s)
-        .trim();
-    let s = s
-        .strip_prefix('"')
-        .and_then(|x| x.strip_suffix('"'))
-        .or_else(|| s.strip_prefix('\'').and_then(|x| x.strip_suffix('\'')))
-        .unwrap_or(s)
-        .trim();
-    s.to_string()
-}
-
 fn normalize_base_url(raw: String) -> String {
     raw.trim().trim_end_matches('/').to_string()
 }
 
 /// OpenAI / OpenAI-compatible auth: `Authorization: Bearer <api_key>`.
-///
-/// See https://platform.openai.com/docs/api-reference/authentication
 pub fn apply_openai_auth(
     mut req: reqwest::RequestBuilder,
     api_key: &str,
 ) -> reqwest::RequestBuilder {
     let key = normalize_api_key(api_key);
     if !key.is_empty() {
-        // Explicit header (equivalent to bearer_auth) so we control the exact value.
         req = req.header(reqwest::header::AUTHORIZATION, format!("Bearer {key}"));
     }
     req
 }
 
-/// Anthropic Messages API auth headers.
-///
-/// Spec: `x-api-key` + required `anthropic-version` (and JSON content-type via body).
-/// See https://platform.claude.com/docs/en/api/overview
+/// Anthropic Messages API auth headers (`x-api-key` + `anthropic-version`).
 pub fn apply_anthropic_auth(
     mut req: reqwest::RequestBuilder,
     api_key: &str,
@@ -114,33 +94,15 @@ impl ChatRequestOptions {
     }
 }
 
-/// Optional sampling / generation parameters for chat completions.
-///
-/// `None` fields are omitted from the request body (server defaults apply).
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
-pub struct LlmSamplingParams {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub temperature: Option<f32>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub top_p: Option<f32>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub top_k: Option<u32>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub max_tokens: Option<u32>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub frequency_penalty: Option<f32>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub presence_penalty: Option<f32>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub seed: Option<i64>,
-    /// OpenAI o-series / compatible gateways: `none` | `low` | `medium` | `high` | …
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub reasoning_effort: Option<String>,
+/// Protocol helpers for core's `LlmSamplingParams` (omit-if-unset).
+pub trait LlmSamplingExt {
+    fn set_fields_summary(&self) -> String;
+    fn apply_openai(&self, body: &mut Value);
+    fn apply_anthropic(&self, body: &mut Value);
 }
 
-impl LlmSamplingParams {
-    /// Human-readable list of fields that will be sent (empty if none).
-    pub fn set_fields_summary(&self) -> String {
+impl LlmSamplingExt for LlmSamplingParams {
+    fn set_fields_summary(&self) -> String {
         let mut parts = Vec::new();
         if let Some(t) = self.temperature {
             parts.push(format!("temperature={t}"));
@@ -175,25 +137,11 @@ impl LlmSamplingParams {
         }
     }
 
-    /// Apply OpenAI-compatible chat.completions fields (only set keys).
-    pub fn apply_openai(&self, body: &mut Value) {
-        let obj = match body.as_object_mut() {
-            Some(o) => o,
-            None => return,
+    fn apply_openai(&self, body: &mut Value) {
+        let Some(obj) = body.as_object_mut() else {
+            return;
         };
-        if let Some(t) = self.temperature {
-            obj.insert("temperature".into(), json!(t));
-        }
-        if let Some(p) = self.top_p {
-            obj.insert("top_p".into(), json!(p));
-        }
-        if let Some(k) = self.top_k {
-            // Non-standard for official OpenAI; many compatible servers accept it.
-            obj.insert("top_k".into(), json!(k));
-        }
-        if let Some(m) = self.max_tokens {
-            obj.insert("max_tokens".into(), json!(m));
-        }
+        insert_common_sampling(obj, self);
         if let Some(f) = self.frequency_penalty {
             obj.insert("frequency_penalty".into(), json!(f));
         }
@@ -210,28 +158,65 @@ impl LlmSamplingParams {
         }
     }
 
-    /// Apply Anthropic Messages API fields (only set keys).
-    ///
-    /// Note: official Anthropic requires `max_tokens`; leave it unset only if your
-    /// gateway accepts that, or enable Max tokens in Advanced settings.
-    pub fn apply_anthropic(&self, body: &mut Value) {
-        let obj = match body.as_object_mut() {
-            Some(o) => o,
-            None => return,
+    fn apply_anthropic(&self, body: &mut Value) {
+        let Some(obj) = body.as_object_mut() else {
+            return;
         };
-        if let Some(t) = self.temperature {
-            obj.insert("temperature".into(), json!(t));
-        }
-        if let Some(p) = self.top_p {
-            obj.insert("top_p".into(), json!(p));
-        }
-        if let Some(k) = self.top_k {
-            obj.insert("top_k".into(), json!(k));
-        }
-        if let Some(m) = self.max_tokens {
-            obj.insert("max_tokens".into(), json!(m));
-        }
+        insert_common_sampling(obj, self);
         // frequency_penalty / presence_penalty / seed / reasoning_effort: not sent
+    }
+}
+
+fn insert_common_sampling(obj: &mut serde_json::Map<String, Value>, p: &LlmSamplingParams) {
+    if let Some(t) = p.temperature {
+        obj.insert("temperature".into(), json!(t));
+    }
+    if let Some(v) = p.top_p {
+        obj.insert("top_p".into(), json!(v));
+    }
+    if let Some(k) = p.top_k {
+        obj.insert("top_k".into(), json!(k));
+    }
+    if let Some(m) = p.max_tokens {
+        obj.insert("max_tokens".into(), json!(m));
+    }
+}
+
+/// Unified OpenAI / Anthropic chat backend (collapses per-crate ProviderKind enums).
+pub enum ChatClient {
+    OpenAi(OpenAiClient),
+    Anthropic(AnthropicClient),
+}
+
+impl ChatClient {
+    pub fn openai(cfg: ProviderConfig) -> Result<Self> {
+        Ok(Self::OpenAi(OpenAiClient::new(cfg)?))
+    }
+
+    pub fn anthropic(cfg: ProviderConfig) -> Result<Self> {
+        Ok(Self::Anthropic(AnthropicClient::new(cfg)?))
+    }
+
+    /// `provider` containing `"anthropic"` (case-insensitive) → Anthropic; else OpenAI-compat.
+    pub fn from_provider_name(provider: &str, cfg: ProviderConfig) -> Result<Self> {
+        if provider.to_ascii_lowercase().contains("anthropic") {
+            Self::anthropic(cfg)
+        } else {
+            Self::openai(cfg)
+        }
+    }
+
+    pub async fn chat(
+        &self,
+        messages: &[ChatMessage],
+        params: &LlmSamplingParams,
+        opts: &ChatRequestOptions,
+        cancel: &CancellationToken,
+    ) -> Result<ChatResult> {
+        match self {
+            Self::OpenAi(c) => c.chat(messages, params, opts, cancel).await,
+            Self::Anthropic(c) => c.chat(messages, params, opts, cancel).await,
+        }
     }
 }
 
@@ -285,6 +270,67 @@ pub async fn check_cancel(token: &CancellationToken) -> Result<()> {
     } else {
         Ok(())
     }
+}
+
+/// Shared API error enrichment for OpenAI and Anthropic responses.
+pub fn format_api_error(
+    kind: ApiErrorKind,
+    status: reqwest::StatusCode,
+    val: &Value,
+    has_api_key: bool,
+    sampling_summary: &str,
+    json_object: bool,
+) -> String {
+    let mut msg = format!("status {status}: {val}");
+    if status.as_u16() == 401 || status.as_u16() == 403 {
+        match kind {
+            ApiErrorKind::OpenAi => {
+                if !has_api_key {
+                    msg.push_str(
+                        " — no API key was sent. Set [pipeline.vision].api_key in config or the GUI.",
+                    );
+                } else {
+                    msg.push_str(
+                        " — API rejected the key. Check Authorization: Bearer <key> (OpenAI) and that the key is valid for this base_url.",
+                    );
+                }
+            }
+            ApiErrorKind::Anthropic => {
+                if !has_api_key {
+                    msg.push_str(
+                        " — no API key was sent. Set api_key in config or the GUI (header: x-api-key).",
+                    );
+                } else {
+                    msg.push_str(
+                        " — API rejected the key. Anthropic expects header x-api-key (not Bearer) for API keys.",
+                    );
+                }
+            }
+        }
+    }
+    let body_str = val.to_string().to_lowercase();
+    if body_str.contains("temperature") {
+        msg.push_str(&format!(
+            " — sampling sent: [{sampling_summary}]. \
+Uncheck Temperature under Advanced model parameters (omit field), or set it to the value this model allows."
+        ));
+    }
+    if json_object
+        && (body_str.contains("response_format")
+            || body_str.contains("json_object")
+            || body_str.contains("response format"))
+    {
+        msg.push_str(
+            " — Uncheck \"JSON object mode\" under Vision model settings if this server does not support response_format.",
+        );
+    }
+    msg
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum ApiErrorKind {
+    OpenAi,
+    Anthropic,
 }
 
 /// Strip markdown code fences if model wraps JSON.
@@ -396,5 +442,10 @@ mod tests {
         let mut anthropic_body = json!({});
         p.apply_anthropic(&mut anthropic_body);
         assert_eq!(anthropic_body, json!({}));
+    }
+
+    #[test]
+    fn normalize_via_core() {
+        assert_eq!(normalize_api_key("  Bearer sk-test  "), "sk-test");
     }
 }

@@ -34,10 +34,6 @@ base_url = "https://api.openai.com/v1"
 model = "gpt-4o-mini"
 # Auth (OpenAI: Authorization Bearer; Anthropic: x-api-key + anthropic-version).
 # api_key = "sk-..."               # set in GUI or here (do not commit secrets)
-# Retry once (text-only) if the model returns invalid JSON (default true)
-structured_repair = true
-# OpenAI-compatible only: response_format json_object (default false; some gateways 400)
-json_object_mode = false
 # Optional sampling (omit any field → not sent; server default applies)
 # temperature = 0.1
 # top_p = 0.9
@@ -47,6 +43,12 @@ json_object_mode = false
 # presence_penalty = 0.0
 # seed = 42
 # reasoning_effort = "low"     # o-series / compatible gateways
+
+[pipeline.vision.structured]
+# Retry once (text-only) if the model returns invalid JSON
+repair = true
+# OpenAI-compatible only: response_format json_object (some gateways 400)
+json_object = false
 
 [gate]
 pixel_diff_threshold = 0.01

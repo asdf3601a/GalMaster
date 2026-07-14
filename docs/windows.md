@@ -35,7 +35,7 @@ Install **Visual Studio 2022** (or Build Tools) with workload:
 ### Option A — prebuilt (from this repo’s `dist/`)
 
 ```text
-dist\windows\galmaster.exe
+dist\windows-x86_64\galmaster.exe
 ```
 
 **Preferred build:** `x86_64-pc-windows-msvc` (via `./scripts/build.sh windows` / cargo-xwin).  
@@ -57,7 +57,7 @@ Screen-capture + network apps are also more likely to be heuristically scanned; 
 
 ```bash
 ./scripts/build.sh --list
-./scripts/build.sh windows          # → dist/windows/galmaster.exe
+./scripts/build.sh windows          # → dist/windows-x86_64/galmaster.exe
 # legacy alias:
 ./scripts/build_windows_msvc.sh
 ```
@@ -89,7 +89,7 @@ First build downloads crates and may take several minutes.
 # first run downloads MSVC CRT/SDK (large, cached under ~/.cache/cargo-xwin)
 sudo apt install clang lld
 ./scripts/build.sh windows
-# → dist/windows/galmaster.exe
+# → dist/windows-x86_64/galmaster.exe
 ```
 
 MinGW (`x86_64-pc-windows-gnu` / `./scripts/build.sh windows-gnu`) is supported for development only; **do not ship it** if Defender is an issue.

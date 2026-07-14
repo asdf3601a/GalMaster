@@ -2,10 +2,10 @@
 
 use async_trait::async_trait;
 use galmaster_capture::frame_to_png_bytes;
+use galmaster_core::config::{LlmSamplingParams, StructuredOutputConfig};
 use galmaster_core::types::{Frame, UnderstandContext, UnderstandingResult};
 use galmaster_provider::{
-    strip_code_fence, AnthropicClient, ChatMessage, ChatRequestOptions, LlmSamplingParams,
-    MessageContent, OpenAiClient, ProviderConfig,
+    strip_code_fence, ChatClient, ChatMessage, ChatRequestOptions, MessageContent, ProviderConfig,
 };
 use serde::Deserialize;
 use tokio_util::sync::CancellationToken;
@@ -21,52 +21,55 @@ pub trait VisionUnderstanding: Send {
     ) -> anyhow::Result<UnderstandingResult>;
 }
 
-enum ProviderKind {
-    OpenAi(OpenAiClient),
-    Anthropic(AnthropicClient),
+/// Options for vision e2e (sampling + structured-output policy).
+#[derive(Debug, Clone)]
+pub struct VisionE2eOptions {
+    pub sampling: LlmSamplingParams,
+    pub structured: StructuredOutputConfig,
+}
+
+impl Default for VisionE2eOptions {
+    fn default() -> Self {
+        Self {
+            sampling: LlmSamplingParams::default(),
+            structured: StructuredOutputConfig::default(),
+        }
+    }
 }
 
 pub struct VisionE2e {
-    provider: ProviderKind,
+    client: ChatClient,
     sampling: LlmSamplingParams,
     structured_repair: bool,
-    json_object_mode: bool,
+    chat_opts: ChatRequestOptions,
 }
 
 impl VisionE2e {
-    pub fn openai(
-        cfg: ProviderConfig,
-        sampling: LlmSamplingParams,
-        structured_repair: bool,
-        json_object_mode: bool,
-    ) -> anyhow::Result<Self> {
-        Ok(Self {
-            provider: ProviderKind::OpenAi(OpenAiClient::new(cfg)?),
-            sampling,
-            structured_repair,
-            json_object_mode,
-        })
-    }
-
-    pub fn anthropic(
-        cfg: ProviderConfig,
-        sampling: LlmSamplingParams,
-        structured_repair: bool,
-        json_object_mode: bool,
-    ) -> anyhow::Result<Self> {
-        Ok(Self {
-            provider: ProviderKind::Anthropic(AnthropicClient::new(cfg)?),
-            sampling,
-            structured_repair,
-            // OpenAI-only; kept for a uniform constructor surface.
-            json_object_mode,
-        })
-    }
-
-    fn chat_opts(&self) -> ChatRequestOptions {
-        ChatRequestOptions {
-            json_object: self.json_object_mode,
+    pub fn new(client: ChatClient, opts: VisionE2eOptions) -> Self {
+        Self {
+            client,
+            sampling: opts.sampling,
+            structured_repair: opts.structured.repair,
+            chat_opts: ChatRequestOptions {
+                json_object: opts.structured.json_object,
+            },
         }
+    }
+
+    pub fn openai(cfg: ProviderConfig, opts: VisionE2eOptions) -> anyhow::Result<Self> {
+        Ok(Self::new(ChatClient::openai(cfg)?, opts))
+    }
+
+    pub fn anthropic(cfg: ProviderConfig, opts: VisionE2eOptions) -> anyhow::Result<Self> {
+        Ok(Self::new(ChatClient::anthropic(cfg)?, opts))
+    }
+
+    pub fn from_provider_name(
+        provider: &str,
+        cfg: ProviderConfig,
+        opts: VisionE2eOptions,
+    ) -> anyhow::Result<Self> {
+        Ok(Self::new(ChatClient::from_provider_name(provider, cfg)?, opts))
     }
 
     async fn chat(
@@ -74,13 +77,10 @@ impl VisionE2e {
         messages: &[ChatMessage],
         cancel: &CancellationToken,
     ) -> anyhow::Result<galmaster_provider::ChatResult> {
-        let opts = self.chat_opts();
-        match &self.provider {
-            ProviderKind::OpenAi(c) => Ok(c.chat(messages, &self.sampling, &opts, cancel).await?),
-            ProviderKind::Anthropic(c) => {
-                Ok(c.chat(messages, &self.sampling, &opts, cancel).await?)
-            }
-        }
+        Ok(self
+            .client
+            .chat(messages, &self.sampling, &self.chat_opts, cancel)
+            .await?)
     }
 }
 
@@ -110,12 +110,7 @@ Rules:
 
 fn repair_user_prompt(bad: &str) -> String {
     const MAX: usize = 800;
-    let truncated = if bad.chars().count() > MAX {
-        let t: String = bad.chars().take(MAX).collect();
-        format!("{t}…")
-    } else {
-        bad.to_string()
-    };
+    let truncated = truncate_chars(bad, MAX);
     format!(
         r#"Your previous reply was not valid JSON. Reply with ONLY one JSON object:
 {{"original":"...","translated":"..."}}
@@ -123,6 +118,15 @@ No markdown, no explanation.
 Previous reply:
 {truncated}"#
     )
+}
+
+fn truncate_chars(s: &str, max_chars: usize) -> String {
+    if s.chars().count() <= max_chars {
+        s.to_string()
+    } else {
+        let t: String = s.chars().take(max_chars).collect();
+        format!("{t}…")
+    }
 }
 
 #[async_trait]
@@ -201,7 +205,7 @@ impl VisionUnderstanding for VisionE2e {
             }
 
             warn!(
-                raw = %truncate_for_log(&repaired.text, 400),
+                raw = %truncate_chars(&repaired.text, 400),
                 "vision e2e structured output invalid after repair; skipping frame"
             );
             return Ok(UnderstandingResult {
@@ -213,7 +217,7 @@ impl VisionUnderstanding for VisionE2e {
         }
 
         warn!(
-            raw = %truncate_for_log(&result.text, 400),
+            raw = %truncate_chars(&result.text, 400),
             "vision e2e structured output invalid; skipping frame"
         );
         Ok(UnderstandingResult {
@@ -222,15 +226,6 @@ impl VisionUnderstanding for VisionE2e {
             confidence: 0.0,
             raw_model: Some(result.text),
         })
-    }
-}
-
-fn truncate_for_log(s: &str, max_chars: usize) -> String {
-    if s.chars().count() <= max_chars {
-        s.to_string()
-    } else {
-        let t: String = s.chars().take(max_chars).collect();
-        format!("{t}…")
     }
 }
 

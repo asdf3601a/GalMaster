@@ -1,6 +1,7 @@
 use crate::{
-    apply_anthropic_auth, check_cancel, ChatMessage, ChatRequestOptions, ChatResult,
-    LlmSamplingParams, MessageContent, ProviderConfig, ProviderError, Result,
+    apply_anthropic_auth, check_cancel, format_api_error, ApiErrorKind, ChatMessage,
+    ChatRequestOptions, ChatResult, LlmSamplingExt, LlmSamplingParams, MessageContent,
+    ProviderConfig, ProviderError, Result,
 };
 use base64::{engine::general_purpose::STANDARD as B64, Engine};
 use reqwest::Client;
@@ -104,26 +105,14 @@ impl AnthropicClient {
         let status = resp.status();
         let val: Value = resp.json().await?;
         if !status.is_success() {
-            let mut msg = format!("status {status}: {val}");
-            if status.as_u16() == 401 || status.as_u16() == 403 {
-                if !self.cfg.has_api_key() {
-                    msg.push_str(
-                        " — no API key was sent. Set api_key in config or the GUI (header: x-api-key).",
-                    );
-                } else {
-                    msg.push_str(
-                        " — API rejected the key. Anthropic expects header x-api-key (not Bearer) for API keys.",
-                    );
-                }
-            }
-            let body_str = val.to_string().to_lowercase();
-            if body_str.contains("temperature") {
-                msg.push_str(&format!(
-                    " — sampling sent: [{sampling_summary}]. \
-Uncheck Temperature under Advanced model parameters (omit field), or set it to the value this model allows."
-                ));
-            }
-            return Err(ProviderError::Api(msg));
+            return Err(ProviderError::Api(format_api_error(
+                ApiErrorKind::Anthropic,
+                status,
+                &val,
+                self.cfg.has_api_key(),
+                &sampling_summary,
+                false,
+            )));
         }
 
         let text = val

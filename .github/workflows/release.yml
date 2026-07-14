@@ -40,7 +40,7 @@ jobs:
             archive: tar.gz
           - os: windows-latest
             target: windows
-            dist: windows
+            dist: windows-x86_64
             asset: galmaster-windows-x86_64
             archive: zip
 
@@ -80,7 +80,8 @@ jobs:
             VERSION="${GITHUB_REF#refs/tags/}"
           else
             SHORT_SHA="$(echo "${GITHUB_SHA}" | cut -c1-7)"
-            VERSION="${CARGO_V}+${SHORT_SHA}"
+            # Hyphen (not +) so asset names are URL-friendly
+            VERSION="${CARGO_V}-${SHORT_SHA}"
           fi
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
           echo "cargo_version=${CARGO_V}" >> "$GITHUB_OUTPUT"
@@ -107,19 +108,42 @@ jobs:
             tar.gz)
               tar -C dist -czf "release/${NAME}.tar.gz" "${DIST}"
               (cd release && sha256sum "${NAME}.tar.gz" > "${NAME}.tar.gz.sha256")
+              tar -tzf "release/${NAME}.tar.gz" | head -20
               ;;
             zip)
-              # Prefer tar zip format (works on Windows runners with bash)
-              if tar -a -c -f "release/${NAME}.zip" -C "dist/${DIST}" . 2>/dev/null; then
-                :
-              elif command -v zip >/dev/null 2>&1; then
-                (cd "dist/${DIST}" && zip -r "../../release/${NAME}.zip" .)
+              # Real ZIP only — never `tar -a … .zip` (GNU tar writes a tar named .zip).
+              ARCHIVE="release/${NAME}.zip"
+              if command -v zip >/dev/null 2>&1; then
+                (cd dist && zip -r "../${ARCHIVE}" "${DIST}")
               elif command -v powershell.exe >/dev/null 2>&1; then
+                # Folder path keeps windows-x86_64/ as the archive root entry.
                 powershell.exe -NoProfile -Command \
-                  "Compress-Archive -Path 'dist/${DIST}\\*' -DestinationPath 'release/${NAME}.zip' -Force"
+                  "Compress-Archive -Path 'dist\\${DIST}' -DestinationPath '${ARCHIVE}' -Force"
+              elif command -v pwsh >/dev/null 2>&1; then
+                pwsh -NoProfile -Command \
+                  "Compress-Archive -Path 'dist/${DIST}' -DestinationPath '${ARCHIVE}' -Force"
               else
-                echo "no zip tool available" >&2
+                echo "no zip tool available (need zip or PowerShell Compress-Archive)" >&2
                 exit 1
+              fi
+              # Fail the job if the file is not a valid ZIP
+              if command -v python3 >/dev/null 2>&1; then
+                python3 -c "
+          import sys, zipfile
+          p = sys.argv[1]
+          with zipfile.ZipFile(p) as z:
+              bad = z.testzip()
+              names = z.namelist()
+              print('zip members:', names[:20])
+              if bad:
+                  raise SystemExit(f'corrupt zip member: {bad}')
+              if not any('galmaster' in n for n in names):
+                  raise SystemExit('zip missing galmaster binary')
+          " "${ARCHIVE}"
+              elif command -v unzip >/dev/null 2>&1; then
+                unzip -t "${ARCHIVE}"
+              else
+                echo "warning: no zip validator (python3/unzip); skipping integrity check" >&2
               fi
               if command -v sha256sum >/dev/null 2>&1; then
                 (cd release && sha256sum "${NAME}.zip" > "${NAME}.zip.sha256")
@@ -228,7 +252,7 @@ jobs:
             echo "| Linux x86_64 | \`*-linux-x86_64.tar.gz\` |"
             echo "| Windows x86_64 (MSVC) | \`*-windows-x86_64.zip\` |"
             echo
-            echo "Each archive contains the binary, \`config.example.toml\`, \`README.txt\`, and a \`.sha256\` checksum."
+            echo "Each archive contains a platform folder with the binary, \`config.example.toml\`, \`README.txt\`, and a \`.sha256\` checksum."
             echo
             echo "### Quick start"
             echo
@@ -243,7 +267,7 @@ jobs:
             echo '```powershell'
             echo "# Windows"
             echo "Expand-Archive galmaster-*-windows-x86_64.zip -DestinationPath ."
-            echo "cd windows"
+            echo "cd windows-x86_64"
             echo ".\galmaster.exe init-config"
             echo ".\galmaster.exe"
             echo '```'

@@ -1,6 +1,7 @@
 use crate::{
-    apply_openai_auth, check_cancel, ChatMessage, ChatRequestOptions, ChatResult, LlmSamplingParams,
-    MessageContent, ModelInfo, ProviderConfig, ProviderError, Result,
+    apply_openai_auth, check_cancel, format_api_error, ApiErrorKind, ChatMessage,
+    ChatRequestOptions, ChatResult, LlmSamplingExt, LlmSamplingParams, MessageContent, ModelInfo,
+    ProviderConfig, ProviderError, Result,
 };
 use base64::{engine::general_purpose::STANDARD as B64, Engine};
 use reqwest::Client;
@@ -87,7 +88,7 @@ impl OpenAiClient {
         let val: Value = resp.json().await?;
         if !status.is_success() {
             return Err(ProviderError::Api(format_api_error(
-                "openai",
+                ApiErrorKind::OpenAi,
                 status,
                 &val,
                 self.cfg.has_api_key(),
@@ -131,7 +132,7 @@ impl OpenAiClient {
         let val: Value = resp.json().await?;
         if !status.is_success() {
             return Err(ProviderError::Api(format_api_error(
-                "openai",
+                ApiErrorKind::OpenAi,
                 status,
                 &val,
                 self.cfg.has_api_key(),
@@ -168,46 +169,6 @@ pub fn join_openai_url(base_url: &str, path: &str) -> String {
     let base = base_url.trim().trim_end_matches('/');
     let path = path.trim_start_matches('/');
     format!("{base}/{path}")
-}
-
-fn format_api_error(
-    provider: &str,
-    status: reqwest::StatusCode,
-    val: &Value,
-    has_api_key: bool,
-    sampling_summary: &str,
-    json_object: bool,
-) -> String {
-    let mut msg = format!("status {status}: {val}");
-    if status.as_u16() == 401 || status.as_u16() == 403 {
-        if !has_api_key {
-            msg.push_str(
-                " — no API key was sent. Set [pipeline.vision].api_key in config or the GUI.",
-            );
-        } else {
-            msg.push_str(
-                " — API rejected the key. Check Authorization: Bearer <key> (OpenAI) and that the key is valid for this base_url.",
-            );
-        }
-    }
-    let body_str = val.to_string().to_lowercase();
-    if body_str.contains("temperature") {
-        msg.push_str(&format!(
-            " — sampling sent: [{sampling_summary}]. \
-Uncheck Temperature under Advanced model parameters (omit field), or set it to the value this model allows."
-        ));
-    }
-    if json_object
-        && (body_str.contains("response_format")
-            || body_str.contains("json_object")
-            || body_str.contains("response format"))
-    {
-        msg.push_str(
-            " — Uncheck \"JSON object mode\" under Vision model settings if this server does not support response_format.",
-        );
-    }
-    let _ = provider;
-    msg
 }
 
 /// Parse OpenAI-style or bare-array model list JSON (unit-testable).

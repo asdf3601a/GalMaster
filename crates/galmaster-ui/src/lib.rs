@@ -1,6 +1,7 @@
 //! Settings UI + subtitle overlay rendering helpers.
 
 mod app;
+mod llm_settings;
 mod style_editor;
 mod system_fonts;
 

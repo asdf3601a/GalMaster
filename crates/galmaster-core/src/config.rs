@@ -268,7 +268,7 @@ impl ContextMode {
 }
 
 /// Optional LLM sampling fields (flattened into stage TOML).
-/// Mirrors `galmaster_provider::LlmSamplingParams` for serde without a core→provider dep.
+/// Single source of truth; provider applies these as omit-if-unset HTTP body fields.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct LlmSamplingParams {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -289,6 +289,43 @@ pub struct LlmSamplingParams {
     pub reasoning_effort: Option<String>,
 }
 
+/// Vision e2e structured-output policy (`[pipeline.vision.structured]`).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct StructuredOutputConfig {
+    /// When true (default), retry once with a text-only repair prompt if JSON parse fails.
+    #[serde(default = "default_true")]
+    pub repair: bool,
+    /// When true, OpenAI chat sends `response_format: { type: "json_object" }`.
+    #[serde(default)]
+    pub json_object: bool,
+}
+
+impl Default for StructuredOutputConfig {
+    fn default() -> Self {
+        Self {
+            repair: true,
+            json_object: false,
+        }
+    }
+}
+
+/// Trim whitespace, strip mistaken `Bearer ` prefix and surrounding quotes from API keys.
+pub fn normalize_api_key(raw: impl AsRef<str>) -> String {
+    let s = raw.as_ref().trim();
+    let s = s
+        .strip_prefix("Bearer ")
+        .or_else(|| s.strip_prefix("bearer "))
+        .unwrap_or(s)
+        .trim();
+    let s = s
+        .strip_prefix('"')
+        .and_then(|x| x.strip_suffix('"'))
+        .or_else(|| s.strip_prefix('\'').and_then(|x| x.strip_suffix('\'')))
+        .unwrap_or(s)
+        .trim();
+    s.to_string()
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StageProviderConfig {
     #[serde(default = "default_vision_backend")]
@@ -302,12 +339,9 @@ pub struct StageProviderConfig {
     /// Single API key for this stage (OpenAI Bearer / Anthropic x-api-key).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub api_key: Option<String>,
-    /// When true (default), vision e2e retries once with a text-only repair prompt if JSON parse fails.
-    #[serde(default = "default_true")]
-    pub structured_repair: bool,
-    /// When true, OpenAI chat sends `response_format: { type: "json_object" }` (some gateways reject this).
+    /// Vision e2e structured-output options (`[pipeline.vision.structured]`).
     #[serde(default)]
-    pub json_object_mode: bool,
+    pub structured: StructuredOutputConfig,
     /// Flattened: `temperature`, `top_p`, … live under the same TOML table.
     #[serde(flatten, default)]
     pub sampling: LlmSamplingParams,
@@ -328,8 +362,7 @@ impl Default for StageProviderConfig {
             base_url: "https://api.openai.com/v1".into(),
             model: "gpt-4o-mini".into(),
             api_key: None,
-            structured_repair: true,
-            json_object_mode: false,
+            structured: StructuredOutputConfig::default(),
             sampling: LlmSamplingParams::default(),
         }
     }
@@ -553,28 +586,16 @@ impl Config {
         Ok(path)
     }
 
-    /// Normalize a raw key string: trim whitespace and strip a mistaken `Bearer ` prefix.
+    /// Normalize a raw key string (see free function [`normalize_api_key`]).
     pub fn normalize_api_key(raw: &str) -> String {
-        let s = raw.trim();
-        let s = s
-            .strip_prefix("Bearer ")
-            .or_else(|| s.strip_prefix("bearer "))
-            .unwrap_or(s)
-            .trim();
-        // Drop surrounding quotes from TOML/copy-paste accidents.
-        let s = s
-            .strip_prefix('"')
-            .and_then(|x| x.strip_suffix('"'))
-            .or_else(|| s.strip_prefix('\'').and_then(|x| x.strip_suffix('\'')))
-            .unwrap_or(s)
-            .trim();
-        s.to_string()
+        // Call free function explicitly (same name as this method).
+        crate::config::normalize_api_key(raw)
     }
 
     /// Resolve the single stage API key from config (`api_key` only).
     pub fn resolve_api_key(api_key: &Option<String>) -> String {
         match api_key {
-            Some(k) => Self::normalize_api_key(k),
+            Some(k) => crate::config::normalize_api_key(k),
             None => String::new(),
         }
     }
@@ -722,6 +743,28 @@ mod path_tests {
         assert_eq!(stage.sampling.top_k, Some(40));
         assert_eq!(stage.sampling.reasoning_effort.as_deref(), Some("low"));
         assert!(stage.sampling.max_tokens.is_none());
+        // nested structured defaults when omitted
+        assert!(stage.structured.repair);
+        assert!(!stage.structured.json_object);
+    }
+
+    #[test]
+    fn vision_structured_nested_toml() {
+        let stage: StageProviderConfig = toml::from_str(
+            r#"
+            provider = "openai_compat"
+            model = "m"
+            temperature = 0.2
+
+            [structured]
+            repair = false
+            json_object = true
+            "#,
+        )
+        .unwrap();
+        assert!(!stage.structured.repair);
+        assert!(stage.structured.json_object);
+        assert_eq!(stage.sampling.temperature, Some(0.2));
     }
 
     #[test]

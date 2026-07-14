@@ -3,8 +3,7 @@ use async_trait::async_trait;
 use galmaster_capture::frame_to_png_bytes;
 use galmaster_core::types::{Frame, SourceKind, TextSegment};
 use galmaster_provider::{
-    AnthropicClient, ChatMessage, ChatRequestOptions, LlmSamplingParams, MessageContent,
-    OpenAiClient, ProviderConfig,
+    ChatClient, ChatMessage, ChatRequestOptions, LlmSamplingParams, MessageContent, ProviderConfig,
 };
 use tokio_util::sync::CancellationToken;
 use tracing::debug;
@@ -18,32 +17,27 @@ Rules:
 - If no subtitle text is visible, output an empty string.
 - Preserve line breaks between subtitle lines."#;
 
-pub enum VisionProviderKind {
-    OpenAi(OpenAiClient),
-    Anthropic(AnthropicClient),
-}
-
 pub struct VisionModelExtractor {
-    provider: VisionProviderKind,
+    client: ChatClient,
     system_prompt: String,
     sampling: LlmSamplingParams,
 }
 
 impl VisionModelExtractor {
-    pub fn openai(cfg: ProviderConfig, sampling: LlmSamplingParams) -> anyhow::Result<Self> {
-        Ok(Self {
-            provider: VisionProviderKind::OpenAi(OpenAiClient::new(cfg)?),
+    pub fn new(client: ChatClient, sampling: LlmSamplingParams) -> Self {
+        Self {
+            client,
             system_prompt: DEFAULT_SYSTEM.into(),
             sampling,
-        })
+        }
+    }
+
+    pub fn openai(cfg: ProviderConfig, sampling: LlmSamplingParams) -> anyhow::Result<Self> {
+        Ok(Self::new(ChatClient::openai(cfg)?, sampling))
     }
 
     pub fn anthropic(cfg: ProviderConfig, sampling: LlmSamplingParams) -> anyhow::Result<Self> {
-        Ok(Self {
-            provider: VisionProviderKind::Anthropic(AnthropicClient::new(cfg)?),
-            system_prompt: DEFAULT_SYSTEM.into(),
-            sampling,
-        })
+        Ok(Self::new(ChatClient::anthropic(cfg)?, sampling))
     }
 
     pub fn with_system_prompt(mut self, prompt: impl Into<String>) -> Self {
@@ -75,14 +69,10 @@ impl Extractor for VisionModelExtractor {
         ];
 
         let opts = ChatRequestOptions::default();
-        let result = match &self.provider {
-            VisionProviderKind::OpenAi(c) => {
-                c.chat(&messages, &self.sampling, &opts, cancel).await?
-            }
-            VisionProviderKind::Anthropic(c) => {
-                c.chat(&messages, &self.sampling, &opts, cancel).await?
-            }
-        };
+        let result = self
+            .client
+            .chat(&messages, &self.sampling, &opts, cancel)
+            .await?;
 
         let text = result.text.trim().to_string();
         debug!(len = text.len(), "vision extract done");

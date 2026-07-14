@@ -3,8 +3,7 @@
 use async_trait::async_trait;
 use galmaster_core::types::{TranslateRequest, TranslateResponse};
 use galmaster_provider::{
-    AnthropicClient, ChatMessage, ChatRequestOptions, LlmSamplingParams, MessageContent,
-    OpenAiClient, ProviderConfig,
+    ChatClient, ChatMessage, ChatRequestOptions, LlmSamplingParams, MessageContent, ProviderConfig,
 };
 use tokio_util::sync::CancellationToken;
 use tracing::debug;
@@ -18,29 +17,22 @@ pub trait Translator: Send + Sync {
     ) -> anyhow::Result<TranslateResponse>;
 }
 
-enum ProviderKind {
-    OpenAi(OpenAiClient),
-    Anthropic(AnthropicClient),
-}
-
 pub struct TextTranslator {
-    provider: ProviderKind,
+    client: ChatClient,
     sampling: LlmSamplingParams,
 }
 
 impl TextTranslator {
+    pub fn new(client: ChatClient, sampling: LlmSamplingParams) -> Self {
+        Self { client, sampling }
+    }
+
     pub fn openai(cfg: ProviderConfig, sampling: LlmSamplingParams) -> anyhow::Result<Self> {
-        Ok(Self {
-            provider: ProviderKind::OpenAi(OpenAiClient::new(cfg)?),
-            sampling,
-        })
+        Ok(Self::new(ChatClient::openai(cfg)?, sampling))
     }
 
     pub fn anthropic(cfg: ProviderConfig, sampling: LlmSamplingParams) -> anyhow::Result<Self> {
-        Ok(Self {
-            provider: ProviderKind::Anthropic(AnthropicClient::new(cfg)?),
-            sampling,
-        })
+        Ok(Self::new(ChatClient::anthropic(cfg)?, sampling))
     }
 
     /// Sugar for LiteRT-LM / local OpenAI-compatible servers.
@@ -84,9 +76,7 @@ impl Translator for TextTranslator {
 
         let mut user = String::new();
         if !req.previous_lines.is_empty() {
-            user.push_str(
-                "Context (previous subtitles; do not re-translate these):\n",
-            );
+            user.push_str("Context (previous subtitles; do not re-translate these):\n");
             for line in &req.previous_lines {
                 user.push_str("- ");
                 user.push_str(line);
@@ -108,10 +98,10 @@ impl Translator for TextTranslator {
         ];
 
         let opts = ChatRequestOptions::default();
-        let result = match &self.provider {
-            ProviderKind::OpenAi(c) => c.chat(&messages, &self.sampling, &opts, cancel).await?,
-            ProviderKind::Anthropic(c) => c.chat(&messages, &self.sampling, &opts, cancel).await?,
-        };
+        let result = self
+            .client
+            .chat(&messages, &self.sampling, &opts, cancel)
+            .await?;
 
         let translated = result.text.trim().to_string();
         debug!(len = translated.len(), "translate done");

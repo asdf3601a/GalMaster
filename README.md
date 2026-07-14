@@ -75,11 +75,11 @@ cargo run -p galmaster
 
 See **[docs/windows.md](docs/windows.md)** for Visual Studio / MSVC setup, build, run, OBS, and troubleshooting.
 
-**Prebuilt (MSVC ABI):** `dist/windows/galmaster.exe` (`x86_64-pc-windows-msvc`).  
+**Prebuilt (MSVC ABI):** `dist/windows-x86_64/galmaster.exe` (`x86_64-pc-windows-msvc`).  
 Do **not** use MinGW (`windows-gnu`) builds for distribution — Windows Defender often false-positives them.
 
 ```powershell
-cd dist\windows
+cd dist\windows-x86_64
 .\galmaster.exe init-config
 # set api_key under [pipeline.vision] in config.toml, or in the GUI
 .\galmaster.exe
@@ -96,7 +96,7 @@ cargo run -p galmaster --release
 ```
 
 Config default path: **`config.toml` next to the executable**  
-(e.g. `dist\windows\config.toml` when you run `galmaster.exe` from that folder).  
+(e.g. `dist\windows-x86_64\config.toml` when you run `galmaster.exe` from that folder).  
 Override with `--config path\to\config.toml`.
 
 API key: set `api_key` under `[pipeline.vision]` in `config.toml`, or in the GUI (Vision model section).
