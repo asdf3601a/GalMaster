@@ -1,12 +1,12 @@
 //! Capture loop + post-capture pipeline worker (vision-language e2e).
 
 use galmaster_capture::{capture_frame_scaled, CaptureTarget};
-use galmaster_core::config::Config;
+use galmaster_core::config::{Config, LlmSamplingParams as CoreSampling};
 use galmaster_core::pipeline::{apply_control, GateBundle, PipelineHandle};
 use galmaster_core::types::{
     ControlMessage, LatencyBreakdown, PipelineProfileKind, TranslationEvent, UnderstandContext,
 };
-use galmaster_provider::ProviderConfig;
+use galmaster_provider::{LlmSamplingParams, ProviderConfig};
 use galmaster_understand::{VisionE2e, VisionUnderstanding};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -163,9 +163,14 @@ async fn process_vision_e2e(
 
     let mut vision = build_vision(cfg)?;
     let t_ex = Instant::now();
+    let previous_lines = if cfg.pipeline.translate.context_active() {
+        context_lines.clone()
+    } else {
+        Vec::new()
+    };
     let ctx = UnderstandContext {
         target_lang: cfg.target_lang().to_string(),
-        previous_lines: context_lines.clone(),
+        previous_lines,
     };
     let result = vision.understand(&frame, &ctx, cancel).await?;
     latency.extract_ms = t_ex.elapsed().as_millis() as u64;
@@ -188,11 +193,20 @@ async fn process_vision_e2e(
         return Ok(None);
     }
 
-    let max_ctx = cfg.pipeline.translate.max_context_lines;
-    if let Some(o) = &result.original {
-        push_context(context_lines, o, max_ctx);
+    if cfg.pipeline.translate.context_active() {
+        if let Some(line) = cfg.pipeline.translate.context_mode.format_line(
+            result.original.as_deref(),
+            &result.translated,
+        ) {
+            push_context(
+                context_lines,
+                line,
+                cfg.pipeline.translate.max_context_lines,
+            );
+        }
+    } else {
+        context_lines.clear();
     }
-    push_context(context_lines, &result.translated, max_ctx);
 
     latency.total_ms = t0.elapsed().as_millis() as u64;
     Ok(Some(TranslationEvent::now(
@@ -203,26 +217,73 @@ async fn process_vision_e2e(
     )))
 }
 
-fn push_context(lines: &mut Vec<String>, s: &str, max: usize) {
-    if s.trim().is_empty() || max == 0 {
+fn push_context(lines: &mut Vec<String>, line: String, max: usize) {
+    if line.trim().is_empty() || max == 0 {
         return;
     }
-    lines.push(s.to_string());
+    lines.push(line);
     while lines.len() > max {
         lines.remove(0);
     }
 }
 
+fn core_to_provider_sampling(s: &CoreSampling) -> LlmSamplingParams {
+    LlmSamplingParams {
+        temperature: s.temperature,
+        top_p: s.top_p,
+        top_k: s.top_k,
+        max_tokens: s.max_tokens,
+        frequency_penalty: s.frequency_penalty,
+        presence_penalty: s.presence_penalty,
+        seed: s.seed,
+        reasoning_effort: s.reasoning_effort.clone(),
+    }
+}
+
 fn build_vision(cfg: &Config) -> anyhow::Result<Box<dyn VisionUnderstanding>> {
-    let key = Config::resolve_api_key(&cfg.pipeline.vision.api_key, &cfg.pipeline.vision.api_key_env);
+    let key = Config::resolve_api_key(&cfg.pipeline.vision.api_key);
+    if key.is_empty() {
+        tracing::warn!(
+            provider = %cfg.pipeline.vision.provider,
+            "no API key set — requests will omit Authorization / x-api-key (local servers may still work)"
+        );
+    } else {
+        tracing::debug!(
+            provider = %cfg.pipeline.vision.provider,
+            key_len = key.len(),
+            "API key set for vision stage"
+        );
+    }
     let pcfg = ProviderConfig::openai_compat(
         &cfg.pipeline.vision.base_url,
         key,
         &cfg.pipeline.vision.model,
     );
+    let sampling = core_to_provider_sampling(&cfg.pipeline.vision.sampling);
+    debug!(
+        model = %cfg.pipeline.vision.model,
+        sampling = %sampling.set_fields_summary(),
+        "vision sampling"
+    );
+    let structured_repair = cfg.pipeline.vision.structured_repair;
+    let json_object_mode = cfg.pipeline.vision.json_object_mode;
+    debug!(
+        structured_repair,
+        json_object_mode, "vision structured output options"
+    );
     if cfg.pipeline.vision.provider.contains("anthropic") {
-        Ok(Box::new(VisionE2e::anthropic(pcfg)?))
+        Ok(Box::new(VisionE2e::anthropic(
+            pcfg,
+            sampling,
+            structured_repair,
+            json_object_mode,
+        )?))
     } else {
-        Ok(Box::new(VisionE2e::openai(pcfg)?))
+        Ok(Box::new(VisionE2e::openai(
+            pcfg,
+            sampling,
+            structured_repair,
+            json_object_mode,
+        )?))
     }
 }

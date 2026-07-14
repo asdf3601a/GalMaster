@@ -3,7 +3,8 @@
 use async_trait::async_trait;
 use galmaster_core::types::{TranslateRequest, TranslateResponse};
 use galmaster_provider::{
-    AnthropicClient, ChatMessage, MessageContent, OpenAiClient, ProviderConfig,
+    AnthropicClient, ChatMessage, ChatRequestOptions, LlmSamplingParams, MessageContent,
+    OpenAiClient, ProviderConfig,
 };
 use tokio_util::sync::CancellationToken;
 use tracing::debug;
@@ -24,25 +25,33 @@ enum ProviderKind {
 
 pub struct TextTranslator {
     provider: ProviderKind,
+    sampling: LlmSamplingParams,
 }
 
 impl TextTranslator {
-    pub fn openai(cfg: ProviderConfig) -> anyhow::Result<Self> {
+    pub fn openai(cfg: ProviderConfig, sampling: LlmSamplingParams) -> anyhow::Result<Self> {
         Ok(Self {
             provider: ProviderKind::OpenAi(OpenAiClient::new(cfg)?),
+            sampling,
         })
     }
 
-    pub fn anthropic(cfg: ProviderConfig) -> anyhow::Result<Self> {
+    pub fn anthropic(cfg: ProviderConfig, sampling: LlmSamplingParams) -> anyhow::Result<Self> {
         Ok(Self {
             provider: ProviderKind::Anthropic(AnthropicClient::new(cfg)?),
+            sampling,
         })
     }
 
     /// Sugar for LiteRT-LM / local OpenAI-compatible servers.
-    pub fn litert_lm_http(base_url: &str, model: &str, api_key: &str) -> anyhow::Result<Self> {
+    pub fn litert_lm_http(
+        base_url: &str,
+        model: &str,
+        api_key: &str,
+        sampling: LlmSamplingParams,
+    ) -> anyhow::Result<Self> {
         let cfg = ProviderConfig::openai_compat(base_url, api_key, model);
-        Self::openai(cfg)
+        Self::openai(cfg, sampling)
     }
 }
 
@@ -54,7 +63,8 @@ Rules:
 - Output ONLY the translation, no quotes, no notes.
 - Keep proper nouns when appropriate.
 - Match roughly the length of the source when possible.
-- If the input is empty, output empty."#
+- If the input is empty, output empty.
+- If previous subtitles are given as context, use them only for disambiguation; translate only the current line."#
     )
 }
 
@@ -74,7 +84,9 @@ impl Translator for TextTranslator {
 
         let mut user = String::new();
         if !req.previous_lines.is_empty() {
-            user.push_str("Context (previous subtitles):\n");
+            user.push_str(
+                "Context (previous subtitles; do not re-translate these):\n",
+            );
             for line in &req.previous_lines {
                 user.push_str("- ");
                 user.push_str(line);
@@ -95,9 +107,10 @@ impl Translator for TextTranslator {
             },
         ];
 
+        let opts = ChatRequestOptions::default();
         let result = match &self.provider {
-            ProviderKind::OpenAi(c) => c.chat(&messages, 0.2, cancel).await?,
-            ProviderKind::Anthropic(c) => c.chat(&messages, 0.2, cancel).await?,
+            ProviderKind::OpenAi(c) => c.chat(&messages, &self.sampling, &opts, cancel).await?,
+            ProviderKind::Anthropic(c) => c.chat(&messages, &self.sampling, &opts, cancel).await?,
         };
 
         let translated = result.text.trim().to_string();

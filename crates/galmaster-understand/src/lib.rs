@@ -4,11 +4,12 @@ use async_trait::async_trait;
 use galmaster_capture::frame_to_png_bytes;
 use galmaster_core::types::{Frame, UnderstandContext, UnderstandingResult};
 use galmaster_provider::{
-    strip_code_fence, AnthropicClient, ChatMessage, MessageContent, OpenAiClient, ProviderConfig,
+    strip_code_fence, AnthropicClient, ChatMessage, ChatRequestOptions, LlmSamplingParams,
+    MessageContent, OpenAiClient, ProviderConfig,
 };
 use serde::Deserialize;
 use tokio_util::sync::CancellationToken;
-use tracing::debug;
+use tracing::{debug, warn};
 
 #[async_trait]
 pub trait VisionUnderstanding: Send {
@@ -27,19 +28,59 @@ enum ProviderKind {
 
 pub struct VisionE2e {
     provider: ProviderKind,
+    sampling: LlmSamplingParams,
+    structured_repair: bool,
+    json_object_mode: bool,
 }
 
 impl VisionE2e {
-    pub fn openai(cfg: ProviderConfig) -> anyhow::Result<Self> {
+    pub fn openai(
+        cfg: ProviderConfig,
+        sampling: LlmSamplingParams,
+        structured_repair: bool,
+        json_object_mode: bool,
+    ) -> anyhow::Result<Self> {
         Ok(Self {
             provider: ProviderKind::OpenAi(OpenAiClient::new(cfg)?),
+            sampling,
+            structured_repair,
+            json_object_mode,
         })
     }
 
-    pub fn anthropic(cfg: ProviderConfig) -> anyhow::Result<Self> {
+    pub fn anthropic(
+        cfg: ProviderConfig,
+        sampling: LlmSamplingParams,
+        structured_repair: bool,
+        json_object_mode: bool,
+    ) -> anyhow::Result<Self> {
         Ok(Self {
             provider: ProviderKind::Anthropic(AnthropicClient::new(cfg)?),
+            sampling,
+            structured_repair,
+            // OpenAI-only; kept for a uniform constructor surface.
+            json_object_mode,
         })
+    }
+
+    fn chat_opts(&self) -> ChatRequestOptions {
+        ChatRequestOptions {
+            json_object: self.json_object_mode,
+        }
+    }
+
+    async fn chat(
+        &self,
+        messages: &[ChatMessage],
+        cancel: &CancellationToken,
+    ) -> anyhow::Result<galmaster_provider::ChatResult> {
+        let opts = self.chat_opts();
+        match &self.provider {
+            ProviderKind::OpenAi(c) => Ok(c.chat(messages, &self.sampling, &opts, cancel).await?),
+            ProviderKind::Anthropic(c) => {
+                Ok(c.chat(messages, &self.sampling, &opts, cancel).await?)
+            }
+        }
     }
 }
 
@@ -62,7 +103,25 @@ Respond with a single JSON object only:
 {{"original":"<source text or empty>","translated":"<translation into {target_lang}>"}}
 Rules:
 - If no subtitle is visible, return {{"original":"","translated":""}}.
-- Do not add explanations or markdown."#
+- Do not add explanations or markdown.
+- If previous lines are provided, use them only for disambiguation and pronouns; translate only the current on-screen subtitle, do not repeat history."#
+    )
+}
+
+fn repair_user_prompt(bad: &str) -> String {
+    const MAX: usize = 800;
+    let truncated = if bad.chars().count() > MAX {
+        let t: String = bad.chars().take(MAX).collect();
+        format!("{t}…")
+    } else {
+        bad.to_string()
+    };
+    format!(
+        r#"Your previous reply was not valid JSON. Reply with ONLY one JSON object:
+{{"original":"...","translated":"..."}}
+No markdown, no explanation.
+Previous reply:
+{truncated}"#
     )
 }
 
@@ -80,7 +139,9 @@ impl VisionUnderstanding for VisionE2e {
             ctx.target_lang
         );
         if !ctx.previous_lines.is_empty() {
-            user.push_str("\nPrevious lines for context:\n");
+            user.push_str(
+                "\nPrevious lines for context (do not re-translate these; current image only):\n",
+            );
             for line in &ctx.previous_lines {
                 user.push_str("- ");
                 user.push_str(line);
@@ -88,10 +149,11 @@ impl VisionUnderstanding for VisionE2e {
             }
         }
 
+        let system = system_prompt(&ctx.target_lang);
         let messages = [
             ChatMessage {
                 role: "system".into(),
-                content: MessageContent::Text(system_prompt(&ctx.target_lang)),
+                content: MessageContent::Text(system.clone()),
             },
             ChatMessage {
                 role: "user".into(),
@@ -102,40 +164,129 @@ impl VisionUnderstanding for VisionE2e {
             },
         ];
 
-        let result = match &self.provider {
-            ProviderKind::OpenAi(c) => c.chat(&messages, 0.1, cancel).await?,
-            ProviderKind::Anthropic(c) => c.chat(&messages, 0.1, cancel).await?,
-        };
+        let result = self.chat(&messages, cancel).await?;
+        debug!(raw = %result.text, "vision e2e raw");
 
-        let cleaned = strip_code_fence(&result.text);
-        debug!(raw = %cleaned, "vision e2e raw");
+        if let Some((original, translated)) = parse_e2e(&result.text) {
+            return Ok(UnderstandingResult {
+                original,
+                translated,
+                confidence: 0.85,
+                raw_model: Some(result.text),
+            });
+        }
 
-        let parsed = parse_e2e(&cleaned);
+        if self.structured_repair && !cancel.is_cancelled() {
+            debug!("vision e2e JSON parse failed; attempting one repair");
+            let repair_messages = [
+                ChatMessage {
+                    role: "system".into(),
+                    content: MessageContent::Text(system),
+                },
+                ChatMessage {
+                    role: "user".into(),
+                    content: MessageContent::Text(repair_user_prompt(&result.text)),
+                },
+            ];
+            let repaired = self.chat(&repair_messages, cancel).await?;
+            debug!(raw = %repaired.text, "vision e2e repair raw");
+
+            if let Some((original, translated)) = parse_e2e(&repaired.text) {
+                return Ok(UnderstandingResult {
+                    original,
+                    translated,
+                    confidence: 0.75,
+                    raw_model: Some(repaired.text),
+                });
+            }
+
+            warn!(
+                raw = %truncate_for_log(&repaired.text, 400),
+                "vision e2e structured output invalid after repair; skipping frame"
+            );
+            return Ok(UnderstandingResult {
+                original: None,
+                translated: String::new(),
+                confidence: 0.0,
+                raw_model: Some(repaired.text),
+            });
+        }
+
+        warn!(
+            raw = %truncate_for_log(&result.text, 400),
+            "vision e2e structured output invalid; skipping frame"
+        );
         Ok(UnderstandingResult {
-            original: parsed.0,
-            translated: parsed.1,
-            confidence: 0.85,
+            original: None,
+            translated: String::new(),
+            confidence: 0.0,
             raw_model: Some(result.text),
         })
     }
 }
 
-fn parse_e2e(text: &str) -> (Option<String>, String) {
-    if let Ok(j) = serde_json::from_str::<E2eJson>(text) {
-        let translated = j
-            .translated
-            .or(j.translation)
-            .unwrap_or_default()
-            .trim()
-            .to_string();
-        let original = j
-            .original
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty());
-        return (original, translated);
+fn truncate_for_log(s: &str, max_chars: usize) -> String {
+    if s.chars().count() <= max_chars {
+        s.to_string()
+    } else {
+        let t: String = s.chars().take(max_chars).collect();
+        format!("{t}…")
     }
-    // Fallback: treat whole response as translation
-    (None, text.trim().to_string())
+}
+
+/// Find the first balanced `{` … `}` slice (string-aware enough for common model junk).
+fn extract_json_object(s: &str) -> Option<&str> {
+    let bytes = s.as_bytes();
+    let start = s.find('{')?;
+    let mut depth = 0i32;
+    let mut in_string = false;
+    let mut escape = false;
+    for (i, &b) in bytes.iter().enumerate().skip(start) {
+        if in_string {
+            if escape {
+                escape = false;
+            } else if b == b'\\' {
+                escape = true;
+            } else if b == b'"' {
+                in_string = false;
+            }
+            continue;
+        }
+        match b {
+            b'"' => in_string = true,
+            b'{' => depth += 1,
+            b'}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(&s[start..=i]);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Parse e2e model output. `None` = invalid structured output (do not show as subtitle).
+fn parse_e2e(text: &str) -> Option<(Option<String>, String)> {
+    let cleaned = strip_code_fence(text);
+    try_parse_e2e_json(&cleaned)
+        .or_else(|| extract_json_object(&cleaned).and_then(try_parse_e2e_json))
+}
+
+fn try_parse_e2e_json(text: &str) -> Option<(Option<String>, String)> {
+    let j: E2eJson = serde_json::from_str(text.trim()).ok()?;
+    let translated = j
+        .translated
+        .or(j.translation)
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    let original = j
+        .original
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    Some((original, translated))
 }
 
 #[cfg(test)]
@@ -144,8 +295,55 @@ mod tests {
 
     #[test]
     fn parse_json() {
-        let (o, t) = parse_e2e(r#"{"original":"Hello","translated":"你好"}"#);
+        let (o, t) = parse_e2e(r#"{"original":"Hello","translated":"你好"}"#).unwrap();
         assert_eq!(o.as_deref(), Some("Hello"));
         assert_eq!(t, "你好");
+    }
+
+    #[test]
+    fn parse_fenced() {
+        let raw = "```json\n{\"original\":\"Hi\",\"translated\":\"嗨\"}\n```";
+        let (o, t) = parse_e2e(raw).unwrap();
+        assert_eq!(o.as_deref(), Some("Hi"));
+        assert_eq!(t, "嗨");
+    }
+
+    #[test]
+    fn parse_with_prefix_junk() {
+        let raw = r#"Here is the result: {"original":"A","translated":"甲"} thanks"#;
+        let (o, t) = parse_e2e(raw).unwrap();
+        assert_eq!(o.as_deref(), Some("A"));
+        assert_eq!(t, "甲");
+    }
+
+    #[test]
+    fn parse_translation_alias() {
+        let (o, t) = parse_e2e(r#"{"original":"X","translation":"Y"}"#).unwrap();
+        assert_eq!(o.as_deref(), Some("X"));
+        assert_eq!(t, "Y");
+    }
+
+    #[test]
+    fn parse_empty_ok() {
+        let (o, t) = parse_e2e(r#"{"original":"","translated":""}"#).unwrap();
+        assert!(o.is_none());
+        assert_eq!(t, "");
+    }
+
+    #[test]
+    fn parse_invalid_returns_none() {
+        assert!(parse_e2e("not json at all").is_none());
+        assert!(parse_e2e("").is_none());
+        assert!(parse_e2e("{broken").is_none());
+    }
+
+    #[test]
+    fn extract_respects_braces_in_strings() {
+        let s = r#"prefix {"original":"a{b}","translated":"c"} tail"#;
+        let slice = extract_json_object(s).unwrap();
+        assert_eq!(slice, r#"{"original":"a{b}","translated":"c"}"#);
+        let (o, t) = parse_e2e(s).unwrap();
+        assert_eq!(o.as_deref(), Some("a{b}"));
+        assert_eq!(t, "c");
     }
 }

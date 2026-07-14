@@ -3,7 +3,8 @@ use async_trait::async_trait;
 use galmaster_capture::frame_to_png_bytes;
 use galmaster_core::types::{Frame, SourceKind, TextSegment};
 use galmaster_provider::{
-    ChatMessage, MessageContent, OpenAiClient, ProviderConfig, AnthropicClient,
+    AnthropicClient, ChatMessage, ChatRequestOptions, LlmSamplingParams, MessageContent,
+    OpenAiClient, ProviderConfig,
 };
 use tokio_util::sync::CancellationToken;
 use tracing::debug;
@@ -25,20 +26,23 @@ pub enum VisionProviderKind {
 pub struct VisionModelExtractor {
     provider: VisionProviderKind,
     system_prompt: String,
+    sampling: LlmSamplingParams,
 }
 
 impl VisionModelExtractor {
-    pub fn openai(cfg: ProviderConfig) -> anyhow::Result<Self> {
+    pub fn openai(cfg: ProviderConfig, sampling: LlmSamplingParams) -> anyhow::Result<Self> {
         Ok(Self {
             provider: VisionProviderKind::OpenAi(OpenAiClient::new(cfg)?),
             system_prompt: DEFAULT_SYSTEM.into(),
+            sampling,
         })
     }
 
-    pub fn anthropic(cfg: ProviderConfig) -> anyhow::Result<Self> {
+    pub fn anthropic(cfg: ProviderConfig, sampling: LlmSamplingParams) -> anyhow::Result<Self> {
         Ok(Self {
             provider: VisionProviderKind::Anthropic(AnthropicClient::new(cfg)?),
             system_prompt: DEFAULT_SYSTEM.into(),
+            sampling,
         })
     }
 
@@ -70,9 +74,14 @@ impl Extractor for VisionModelExtractor {
             },
         ];
 
+        let opts = ChatRequestOptions::default();
         let result = match &self.provider {
-            VisionProviderKind::OpenAi(c) => c.chat(&messages, 0.0, cancel).await?,
-            VisionProviderKind::Anthropic(c) => c.chat(&messages, 0.0, cancel).await?,
+            VisionProviderKind::OpenAi(c) => {
+                c.chat(&messages, &self.sampling, &opts, cancel).await?
+            }
+            VisionProviderKind::Anthropic(c) => {
+                c.chat(&messages, &self.sampling, &opts, cancel).await?
+            }
         };
 
         let text = result.text.trim().to_string();

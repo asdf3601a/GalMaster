@@ -22,14 +22,31 @@ profile = "vision_e2e"
 [pipeline.translate]
 # target_lang is used by the VLM prompt
 target_lang = "zh-TW"
+# Pass previous subtitle lines into the model (cleared on Start).
+context_enabled = true
 max_context_lines = 3
+# original | translated | bilingual (stores "src → tgt" per line)
+context_mode = "bilingual"
 
 [pipeline.vision]
 provider = "openai_compat"         # openai_compat | anthropic
 base_url = "https://api.openai.com/v1"
 model = "gpt-4o-mini"
-api_key_env = "GALMASTER_API_KEY"
-# api_key = ""
+# Auth (OpenAI: Authorization Bearer; Anthropic: x-api-key + anthropic-version).
+# api_key = "sk-..."               # set in GUI or here (do not commit secrets)
+# Retry once (text-only) if the model returns invalid JSON (default true)
+structured_repair = true
+# OpenAI-compatible only: response_format json_object (default false; some gateways 400)
+json_object_mode = false
+# Optional sampling (omit any field → not sent; server default applies)
+# temperature = 0.1
+# top_p = 0.9
+# top_k = 40                    # not all OpenAI-compatible servers accept this
+# max_tokens = 512              # required by official Anthropic Messages API
+# frequency_penalty = 0.0
+# presence_penalty = 0.0
+# seed = 42
+# reasoning_effort = "low"     # o-series / compatible gateways
 
 [gate]
 pixel_diff_threshold = 0.01

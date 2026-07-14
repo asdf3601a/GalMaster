@@ -192,34 +192,101 @@ impl Default for PipelineConfig {
     fn default() -> Self {
         Self {
             profile: default_profile(),
-            extract: StageProviderConfig {
-                backend: "vision_model".into(),
-                provider: "openai_compat".into(),
-                base_url: "https://api.openai.com/v1".into(),
-                model: "gpt-4o-mini".into(),
-                api_key_env: "GALMASTER_API_KEY".into(),
-                api_key: None,
-            },
-            translate: TranslateStageConfig {
-                backend: "openai_compat".into(),
-                base_url: "https://api.openai.com/v1".into(),
-                model: "gpt-4o-mini".into(),
-                api_key_env: "GALMASTER_API_KEY".into(),
-                api_key: None,
-                target_lang: "zh-TW".into(),
-                source_lang: None,
-                max_context_lines: 3,
-            },
-            vision: StageProviderConfig {
-                backend: "vision_model".into(),
-                provider: "openai_compat".into(),
-                base_url: "https://api.openai.com/v1".into(),
-                model: "gpt-4o-mini".into(),
-                api_key_env: "GALMASTER_API_KEY".into(),
-                api_key: None,
-            },
+            extract: StageProviderConfig::default(),
+            translate: TranslateStageConfig::default(),
+            vision: StageProviderConfig::default(),
         }
     }
+}
+
+/// What to store / inject as previous subtitle lines for disambiguation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ContextMode {
+    /// Source text only.
+    Original,
+    /// Translated text only.
+    Translated,
+    /// One line: `original → translated` (or just translated if no original).
+    #[default]
+    Bilingual,
+}
+
+impl ContextMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Original => "original",
+            Self::Translated => "translated",
+            Self::Bilingual => "bilingual",
+        }
+    }
+
+    pub fn from_str_lossy(s: &str) -> Self {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "original" | "src" | "source" => Self::Original,
+            "translated" | "tgt" | "target" => Self::Translated,
+            _ => Self::Bilingual,
+        }
+    }
+
+    /// Format one history line from a accepted subtitle pair. `None` if empty.
+    pub fn format_line(self, original: Option<&str>, translated: &str) -> Option<String> {
+        const MAX_CHARS: usize = 200;
+        let trunc = |s: &str| -> String {
+            let t = s.trim();
+            if t.chars().count() <= MAX_CHARS {
+                t.to_string()
+            } else {
+                t.chars().take(MAX_CHARS).collect::<String>() + "…"
+            }
+        };
+        match self {
+            Self::Original => {
+                let o = original.map(str::trim).filter(|s| !s.is_empty())?;
+                Some(trunc(o))
+            }
+            Self::Translated => {
+                let t = translated.trim();
+                if t.is_empty() {
+                    None
+                } else {
+                    Some(trunc(t))
+                }
+            }
+            Self::Bilingual => {
+                let t = translated.trim();
+                let o = original.map(str::trim).filter(|s| !s.is_empty());
+                match (o, t.is_empty()) {
+                    (Some(o), false) => Some(trunc(&format!("{o} → {t}"))),
+                    (Some(o), true) => Some(trunc(o)),
+                    (None, false) => Some(trunc(t)),
+                    (None, true) => None,
+                }
+            }
+        }
+    }
+}
+
+/// Optional LLM sampling fields (flattened into stage TOML).
+/// Mirrors `galmaster_provider::LlmSamplingParams` for serde without a core→provider dep.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct LlmSamplingParams {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub temperature: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub top_p: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub top_k: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_tokens: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub frequency_penalty: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub presence_penalty: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub seed: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -232,10 +299,18 @@ pub struct StageProviderConfig {
     pub base_url: String,
     #[serde(default)]
     pub model: String,
-    #[serde(default = "default_api_key_env")]
-    pub api_key_env: String,
+    /// Single API key for this stage (OpenAI Bearer / Anthropic x-api-key).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub api_key: Option<String>,
+    /// When true (default), vision e2e retries once with a text-only repair prompt if JSON parse fails.
+    #[serde(default = "default_true")]
+    pub structured_repair: bool,
+    /// When true, OpenAI chat sends `response_format: { type: "json_object" }` (some gateways reject this).
+    #[serde(default)]
+    pub json_object_mode: bool,
+    /// Flattened: `temperature`, `top_p`, … live under the same TOML table.
+    #[serde(flatten, default)]
+    pub sampling: LlmSamplingParams,
 }
 
 fn default_vision_backend() -> String {
@@ -243,9 +318,6 @@ fn default_vision_backend() -> String {
 }
 fn default_provider() -> String {
     "openai_compat".into()
-}
-fn default_api_key_env() -> String {
-    "GALMASTER_API_KEY".into()
 }
 
 impl Default for StageProviderConfig {
@@ -255,8 +327,10 @@ impl Default for StageProviderConfig {
             provider: default_provider(),
             base_url: "https://api.openai.com/v1".into(),
             model: "gpt-4o-mini".into(),
-            api_key_env: default_api_key_env(),
             api_key: None,
+            structured_repair: true,
+            json_object_mode: false,
+            sampling: LlmSamplingParams::default(),
         }
     }
 }
@@ -269,16 +343,22 @@ pub struct TranslateStageConfig {
     pub base_url: String,
     #[serde(default)]
     pub model: String,
-    #[serde(default = "default_api_key_env")]
-    pub api_key_env: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub api_key: Option<String>,
     #[serde(default = "default_target_lang")]
     pub target_lang: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_lang: Option<String>,
+    /// When false, do not accumulate or send previous subtitle lines.
+    #[serde(default = "default_true")]
+    pub context_enabled: bool,
     #[serde(default = "default_context_lines")]
     pub max_context_lines: usize,
+    #[serde(default)]
+    pub context_mode: ContextMode,
+    /// Optional sampling for pure-text translate backends (flattened).
+    #[serde(flatten, default)]
+    pub sampling: LlmSamplingParams,
 }
 
 fn default_target_lang() -> String {
@@ -294,12 +374,21 @@ impl Default for TranslateStageConfig {
             backend: default_provider(),
             base_url: "https://api.openai.com/v1".into(),
             model: "gpt-4o-mini".into(),
-            api_key_env: default_api_key_env(),
             api_key: None,
             target_lang: default_target_lang(),
             source_lang: None,
+            context_enabled: true,
             max_context_lines: default_context_lines(),
+            context_mode: ContextMode::Bilingual,
+            sampling: LlmSamplingParams::default(),
         }
+    }
+}
+
+impl TranslateStageConfig {
+    /// Whether the pipeline should inject previous lines into the model prompt.
+    pub fn context_active(&self) -> bool {
+        self.context_enabled && self.max_context_lines > 0
     }
 }
 
@@ -464,14 +553,35 @@ impl Config {
         Ok(path)
     }
 
-    /// Resolve API key: explicit config → env var → empty.
-    pub fn resolve_api_key(explicit: &Option<String>, env_name: &str) -> String {
-        if let Some(k) = explicit {
-            if !k.is_empty() {
-                return k.clone();
-            }
+    /// Normalize a raw key string: trim whitespace and strip a mistaken `Bearer ` prefix.
+    pub fn normalize_api_key(raw: &str) -> String {
+        let s = raw.trim();
+        let s = s
+            .strip_prefix("Bearer ")
+            .or_else(|| s.strip_prefix("bearer "))
+            .unwrap_or(s)
+            .trim();
+        // Drop surrounding quotes from TOML/copy-paste accidents.
+        let s = s
+            .strip_prefix('"')
+            .and_then(|x| x.strip_suffix('"'))
+            .or_else(|| s.strip_prefix('\'').and_then(|x| x.strip_suffix('\'')))
+            .unwrap_or(s)
+            .trim();
+        s.to_string()
+    }
+
+    /// Resolve the single stage API key from config (`api_key` only).
+    pub fn resolve_api_key(api_key: &Option<String>) -> String {
+        match api_key {
+            Some(k) => Self::normalize_api_key(k),
+            None => String::new(),
         }
-        std::env::var(env_name).unwrap_or_default()
+    }
+
+    /// Whether a non-empty key is configured (for UI status).
+    pub fn has_api_key(api_key: &Option<String>) -> bool {
+        !Self::resolve_api_key(api_key).is_empty()
     }
 
     pub fn profile_kind(&self) -> crate::types::PipelineProfileKind {
@@ -556,5 +666,80 @@ mod path_tests {
         }
         let w: Wrap = toml::from_str("").unwrap();
         assert!(w.overlay.enabled);
+    }
+
+    #[test]
+    fn context_mode_format_and_defaults() {
+        assert_eq!(
+            ContextMode::Bilingual.format_line(Some("Hello"), "你好").as_deref(),
+            Some("Hello → 你好")
+        );
+        assert_eq!(
+            ContextMode::Original.format_line(Some("Hello"), "你好").as_deref(),
+            Some("Hello")
+        );
+        assert_eq!(
+            ContextMode::Translated
+                .format_line(Some("Hello"), "你好")
+                .as_deref(),
+            Some("你好")
+        );
+        assert!(ContextMode::Original.format_line(None, "你好").is_none());
+
+        let t = TranslateStageConfig::default();
+        assert!(t.context_enabled);
+        assert!(t.context_active());
+        assert_eq!(t.context_mode, ContextMode::Bilingual);
+
+        let partial: TranslateStageConfig = toml::from_str(
+            r#"
+            target_lang = "en"
+            context_enabled = false
+            "#,
+        )
+        .unwrap();
+        assert!(!partial.context_active());
+        assert_eq!(partial.target_lang, "en");
+    }
+
+    #[test]
+    fn vision_sampling_flatten_toml() {
+        let stage: StageProviderConfig = toml::from_str(
+            r#"
+            provider = "openai_compat"
+            base_url = "http://127.0.0.1:8080/v1"
+            model = "m"
+            temperature = 0.3
+            top_p = 0.9
+            top_k = 40
+            reasoning_effort = "low"
+            "#,
+        )
+        .unwrap();
+        assert_eq!(stage.model, "m");
+        assert_eq!(stage.sampling.temperature, Some(0.3));
+        assert_eq!(stage.sampling.top_p, Some(0.9));
+        assert_eq!(stage.sampling.top_k, Some(40));
+        assert_eq!(stage.sampling.reasoning_effort.as_deref(), Some("low"));
+        assert!(stage.sampling.max_tokens.is_none());
+    }
+
+    #[test]
+    fn normalize_api_key_strips_bearer_and_quotes() {
+        assert_eq!(Config::normalize_api_key("  Bearer sk-abc  "), "sk-abc");
+        assert_eq!(Config::normalize_api_key("\"sk-xyz\""), "sk-xyz");
+        assert_eq!(Config::normalize_api_key("sk-plain"), "sk-plain");
+    }
+
+    #[test]
+    fn resolve_api_key_single_field() {
+        assert_eq!(
+            Config::resolve_api_key(&Some("  Bearer sk-from-config  ".into())),
+            "sk-from-config"
+        );
+        assert_eq!(Config::resolve_api_key(&None), "");
+        assert_eq!(Config::resolve_api_key(&Some("".into())), "");
+        assert!(Config::has_api_key(&Some("sk-x".into())));
+        assert!(!Config::has_api_key(&None));
     }
 }

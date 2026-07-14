@@ -38,7 +38,7 @@ Install **Visual Studio 2022** (or Build Tools) with workload:
 dist\windows\galmaster.exe
 ```
 
-**Preferred build:** `x86_64-pc-windows-msvc` (via `scripts/build_windows_msvc.sh` / cargo-xwin).  
+**Preferred build:** `x86_64-pc-windows-msvc` (via `./scripts/build.sh windows` / cargo-xwin).  
 Avoid distributing **MinGW `windows-gnu`** builds — Defender frequently false-positives them as malware.
 
 #### Windows Defender still quarantines?
@@ -52,6 +52,18 @@ Unsigned EXEs (especially new/rare hashes) can still be blocked. Mitigations, be
 5. Submit false positive: https://www.microsoft.com/wdsi/filesubmission
 
 Screen-capture + network apps are also more likely to be heuristically scanned; a stable version resource + manifest is already embedded to look less like a packer stub.
+
+### Multi-platform script (Linux / macOS / Windows)
+
+```bash
+./scripts/build.sh --list
+./scripts/build.sh windows          # → dist/windows/galmaster.exe
+# legacy alias:
+./scripts/build_windows_msvc.sh
+```
+
+On Windows with MSVC installed, the same script builds natively (`cargo build --target x86_64-pc-windows-msvc`).  
+From Linux/macOS it uses **cargo-xwin** + static CRT.
 
 ### Option B — build on Windows (MSVC, recommended for local dev)
 
@@ -73,14 +85,14 @@ First build downloads crates and may take several minutes.
 ### Option C — cross-compile from Linux (**MSVC, recommended**)
 
 ```bash
-# needs: clang, lld, cargo-xwin
+# needs: clang, lld; cargo-xwin is installed by the script if missing
+# first run downloads MSVC CRT/SDK (large, cached under ~/.cache/cargo-xwin)
 sudo apt install clang lld
-cargo install cargo-xwin --locked
-./scripts/build_windows_msvc.sh
+./scripts/build.sh windows
 # → dist/windows/galmaster.exe
 ```
 
-MinGW (`x86_64-pc-windows-gnu`) is supported for development only; **do not ship it** if Defender is an issue.
+MinGW (`x86_64-pc-windows-gnu` / `./scripts/build.sh windows-gnu`) is supported for development only; **do not ship it** if Defender is an issue.
 
 ## 3. Configure
 
@@ -101,37 +113,15 @@ Override anytime: `.\galmaster.exe --config D:\path\config.toml`
 
 ### API key
 
-```powershell
-# Session only
-$env:GALMASTER_API_KEY = "sk-your-key"
-
-# Or permanent for your user
-[System.Environment]::SetEnvironmentVariable("GALMASTER_API_KEY", "sk-your-key", "User")
-```
-
-You can also set `api_key = "..."` under `[pipeline.extract]` / `[pipeline.translate]` / `[pipeline.vision]` in the TOML (avoid committing secrets).
-
-### Typical Windows config snippets
-
-**Cloud vision extract + local LiteRT-LM translate:**
+Set a single `api_key` under `[pipeline.vision]` (GUI password field, or `config.toml`).  
+OpenAI uses `Authorization: Bearer`; Anthropic uses `x-api-key`. Do not commit secrets.
 
 ```toml
-[pipeline]
-profile = "extract_then_translate"
-
-[pipeline.extract]
-backend = "vision_model"
-provider = "openai_compat"
-base_url = "https://api.openai.com/v1"
-model = "gpt-4o-mini"
-api_key_env = "GALMASTER_API_KEY"
-
-[pipeline.translate]
-backend = "litert_lm_http"
-base_url = "http://127.0.0.1:8080/v1"
-model = "your-local-model-id"
-target_lang = "zh-TW"
+[pipeline.vision]
+api_key = "sk-your-key"
 ```
+
+### Typical Windows config snippets
 
 **Single vision e2e call:**
 
@@ -143,6 +133,7 @@ profile = "vision_e2e"
 provider = "openai_compat"
 base_url = "https://api.openai.com/v1"
 model = "gpt-4o-mini"
+api_key = "sk-your-key"
 ```
 
 **Subtitle font (CJK):**
@@ -221,7 +212,7 @@ If `[obs].bind` is changed in config, restart GalMaster and update the Browser S
 | `link.exe` / MSVC not found | Install VS “Desktop development with C++”; open “x64 Native Tools” shell or ensure `vcvars` is on PATH. |
 | Empty window list | Run as normal user; try refreshing; some elevated/fullscreen apps are invisible to WGC. |
 | Capture black frame | Switch game to borderless; disable exclusive fullscreen; try another window. |
-| API 401 | Check `GALMASTER_API_KEY` and provider `base_url`. |
+| API 401 | Check `api_key` under `[pipeline.vision]` and `base_url`. |
 | OBS blank | Confirm GalMaster is running; open `http://127.0.0.1:8765/` in a browser; check bind address. |
 | CJK tofu (□□) | Set `[style].font_path` to a TTF/OTF/TTC that contains CJK (e.g. `msyh.ttc`, Noto Sans CJK). |
 | High latency / cost | Shrink ROI; raise `pixel_diff_threshold`; lower FPS; prefer extract-then-local-translate over per-frame vision e2e. |

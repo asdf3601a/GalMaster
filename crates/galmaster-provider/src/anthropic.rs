@@ -1,5 +1,6 @@
 use crate::{
-    check_cancel, ChatMessage, ChatResult, MessageContent, ProviderConfig, ProviderError, Result,
+    apply_anthropic_auth, check_cancel, ChatMessage, ChatRequestOptions, ChatResult,
+    LlmSamplingParams, MessageContent, ProviderConfig, ProviderError, Result,
 };
 use base64::{engine::general_purpose::STANDARD as B64, Engine};
 use reqwest::Client;
@@ -24,12 +25,16 @@ impl AnthropicClient {
     pub async fn chat(
         &self,
         messages: &[ChatMessage],
-        temperature: f32,
+        params: &LlmSamplingParams,
+        opts: &ChatRequestOptions,
         cancel: &CancellationToken,
     ) -> Result<ChatResult> {
         check_cancel(cancel).await?;
 
         // Anthropic: system is separate; messages are user/assistant.
+        // `opts.json_object` is OpenAI-only; ignored here.
+        let _ = opts;
+
         let mut system = String::new();
         let mut api_messages: Vec<Value> = Vec::new();
 
@@ -70,33 +75,25 @@ impl AnthropicClient {
         let mut body = json!({
             "model": self.cfg.model,
             "messages": api_messages,
-            "max_tokens": 1024,
-            "temperature": temperature,
         });
+        params.apply_anthropic(&mut body);
+        let sampling_summary = params.set_fields_summary();
         if !system.is_empty() {
             body["system"] = json!(system);
         }
 
-        let url = format!("{}/messages", self.cfg.base_url.trim_end_matches('/'));
-        // Allow either full base including /v1 or bare host
-        let url = if url.contains("/v1/messages") {
-            url
-        } else if self.cfg.base_url.contains("/v1") {
-            format!("{}/messages", self.cfg.base_url.trim_end_matches('/'))
-        } else {
-            format!("{}/v1/messages", self.cfg.base_url.trim_end_matches('/'))
-        };
+        let url = anthropic_messages_url(&self.cfg.base_url);
 
-        debug!(%url, model = %self.cfg.model, "anthropic chat");
+        debug!(
+            %url,
+            model = %self.cfg.model,
+            has_api_key = self.cfg.has_api_key(),
+            sampling = %sampling_summary,
+            "anthropic chat"
+        );
 
-        let mut req = self
-            .http
-            .post(&url)
-            .header("anthropic-version", "2023-06-01")
-            .json(&body);
-        if !self.cfg.api_key.is_empty() {
-            req = req.header("x-api-key", &self.cfg.api_key);
-        }
+        // Headers per Anthropic API: x-api-key + anthropic-version (+ content-type).
+        let req = apply_anthropic_auth(self.http.post(&url).json(&body), &self.cfg.api_key);
 
         let send = req.send();
         let resp = tokio::select! {
@@ -107,7 +104,26 @@ impl AnthropicClient {
         let status = resp.status();
         let val: Value = resp.json().await?;
         if !status.is_success() {
-            return Err(ProviderError::Api(format!("status {status}: {val}")));
+            let mut msg = format!("status {status}: {val}");
+            if status.as_u16() == 401 || status.as_u16() == 403 {
+                if !self.cfg.has_api_key() {
+                    msg.push_str(
+                        " — no API key was sent. Set api_key in config or the GUI (header: x-api-key).",
+                    );
+                } else {
+                    msg.push_str(
+                        " — API rejected the key. Anthropic expects header x-api-key (not Bearer) for API keys.",
+                    );
+                }
+            }
+            let body_str = val.to_string().to_lowercase();
+            if body_str.contains("temperature") {
+                msg.push_str(&format!(
+                    " — sampling sent: [{sampling_summary}]. \
+Uncheck Temperature under Advanced model parameters (omit field), or set it to the value this model allows."
+                ));
+            }
+            return Err(ProviderError::Api(msg));
         }
 
         let text = val
@@ -124,5 +140,46 @@ impl AnthropicClient {
             text,
             raw: Some(val),
         })
+    }
+}
+
+/// Resolve Anthropic Messages endpoint from a flexible base URL.
+///
+/// Accepts `https://api.anthropic.com`, `…/v1`, or a full `…/v1/messages`.
+pub fn anthropic_messages_url(base_url: &str) -> String {
+    let base = base_url.trim().trim_end_matches('/');
+    if base.ends_with("/v1/messages") {
+        base.to_string()
+    } else if base.ends_with("/messages") {
+        base.to_string()
+    } else if base.contains("/v1") {
+        format!("{base}/messages")
+    } else {
+        format!("{base}/v1/messages")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn messages_url_variants() {
+        assert_eq!(
+            anthropic_messages_url("https://api.anthropic.com"),
+            "https://api.anthropic.com/v1/messages"
+        );
+        assert_eq!(
+            anthropic_messages_url("https://api.anthropic.com/v1"),
+            "https://api.anthropic.com/v1/messages"
+        );
+        assert_eq!(
+            anthropic_messages_url("https://api.anthropic.com/v1/"),
+            "https://api.anthropic.com/v1/messages"
+        );
+        assert_eq!(
+            anthropic_messages_url("https://api.anthropic.com/v1/messages"),
+            "https://api.anthropic.com/v1/messages"
+        );
     }
 }

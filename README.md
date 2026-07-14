@@ -20,10 +20,46 @@ sudo apt install pkg-config libpipewire-0.3-dev libclang-dev \
   libxcb-xfixes0-dev libx11-dev libwayland-dev
 ```
 
+### Multi-platform release build
+
+Use **`./scripts/build.sh`** to produce packaged binaries under `dist/`:
+
+```bash
+./scripts/build.sh --list          # what this host can build
+./scripts/build.sh                 # host only → dist/linux-x86_64/ (etc.)
+./scripts/build.sh windows         # Windows MSVC via cargo-xwin (from Linux/macOS)
+./scripts/build.sh linux windows   # several targets
+./scripts/build.sh all             # every feasible target on this machine
+```
+
+Each package folder contains the binary, `.sha256`, `README.txt`, and `config.example.toml`.  
+`scripts/build_windows_msvc.sh` remains as a thin wrapper around `build.sh windows`.
+
+### GitHub Actions (auto build + Release)
+
+Workflow: [`.github/workflows/release.yml`](.github/workflows/release.yml)
+
+| Event | Result |
+|-------|--------|
+| **Push to `main` / `master`** | Build Linux / Windows / macOS → update prerelease **`continuous`** |
+| **Push tag `v*`** (e.g. `v0.1.0`) | Same builds → versioned **GitHub Release** |
+| **Pull request** | Build only (no release) |
+| **workflow_dispatch** | Same as push to default branch |
+
+Platforms: `linux-x86_64`, `windows-x86_64` (MSVC), `macos-aarch64`, `macos-x86_64`.
+
+```bash
+# Publish a stable release after merging to main
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+Download assets from the repo **Releases** page (or the `continuous` prerelease for the latest main build).
+
 ### Build & run (Linux / macOS)
 
 ```bash
-# Build
+# Or: ./scripts/build.sh && ./dist/linux-x86_64/galmaster
 cargo build -p galmaster --release
 
 # Optional: write default config
@@ -39,24 +75,23 @@ cargo run -p galmaster
 
 See **[docs/windows.md](docs/windows.md)** for Visual Studio / MSVC setup, build, run, OBS, and troubleshooting.
 
-**Prebuilt (MSVC ABI):** `dist/windows/galmaster.exe` (~13 MB, `x86_64-pc-windows-msvc`).  
+**Prebuilt (MSVC ABI):** `dist/windows/galmaster.exe` (`x86_64-pc-windows-msvc`).  
 Do **not** use MinGW (`windows-gnu`) builds for distribution — Windows Defender often false-positives them.
 
 ```powershell
 cd dist\windows
 .\galmaster.exe init-config
-$env:GALMASTER_API_KEY = "sk-..."
+# set api_key under [pipeline.vision] in config.toml, or in the GUI
 .\galmaster.exe
 ```
 
-Rebuild from Linux: `./scripts/build_windows_msvc.sh` (see [docs/windows.md](docs/windows.md) if Defender still quarantines).
+Rebuild from Linux/macOS: `./scripts/build.sh windows` (see [docs/windows.md](docs/windows.md) if Defender still quarantines).
 
 Quick path from source (PowerShell, Rust MSVC + “Desktop development with C++”):
 
 ```powershell
 cd GalMaster
 cargo build -p galmaster --release
-$env:GALMASTER_API_KEY = "sk-..."
 cargo run -p galmaster --release
 ```
 
@@ -64,7 +99,7 @@ Config default path: **`config.toml` next to the executable**
 (e.g. `dist\windows\config.toml` when you run `galmaster.exe` from that folder).  
 Override with `--config path\to\config.toml`.
 
-API keys: set `GALMASTER_API_KEY` or put `api_key` in the config stages.
+API key: set `api_key` under `[pipeline.vision]` in `config.toml`, or in the GUI (Vision model section).
 
 ## Pipeline
 

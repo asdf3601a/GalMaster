@@ -2,7 +2,10 @@ use crate::style_editor::{apply_fonts, draw_subtitle_preview, style_editor_ui};
 use eframe::egui;
 use eframe::egui::{ColorImage, TextureHandle, TextureOptions};
 use galmaster_capture::{capture_frame_scaled, list_windows, CaptureTarget, WindowInfo};
-use galmaster_core::config::{Config, OverlayBackdrop, ScaleFilter, WindowMatchMode};
+use galmaster_core::config::{
+    Config, ContextMode, LlmSamplingParams, OverlayBackdrop, ScaleFilter, StageProviderConfig,
+    TranslateStageConfig, WindowMatchMode,
+};
 use galmaster_core::pipeline::PipelineHandle;
 use galmaster_core::types::{ControlMessage, NormRect, TranslationEvent};
 use galmaster_provider::fetch_openai_model_ids;
@@ -133,11 +136,13 @@ impl GalMasterApp {
     }
 
     fn vision_fetch_key(config: &Config) -> String {
+        // Include whether a key is present (not the secret) so list refresh re-runs after key change.
+        let has_key = Config::has_api_key(&config.pipeline.vision.api_key);
         format!(
-            "{}|{}|{}",
+            "{}|{}|key={}",
             config.pipeline.vision.provider,
             config.pipeline.vision.base_url,
-            config.pipeline.vision.api_key_env
+            has_key
         )
     }
 
@@ -197,10 +202,7 @@ impl GalMasterApp {
         }
 
         let base_url = self.config.pipeline.vision.base_url.clone();
-        let api_key = Config::resolve_api_key(
-            &self.config.pipeline.vision.api_key,
-            &self.config.pipeline.vision.api_key_env,
-        );
+        let api_key = Config::resolve_api_key(&self.config.pipeline.vision.api_key);
         if base_url.trim().is_empty() {
             self.models_status = "Set Base URL first".into();
             self.models_manual = true;
@@ -750,15 +752,11 @@ impl GalMasterApp {
         ui.group(|ui| {
             let prev_provider = self.config.pipeline.vision.provider.clone();
             let prev_base = self.config.pipeline.vision.base_url.clone();
-            let prev_key_env = self.config.pipeline.vision.api_key_env.clone();
+            let prev_has_key = Config::has_api_key(&self.config.pipeline.vision.api_key);
 
             provider_picker(ui, &mut self.config.pipeline.vision.provider);
             labeled_field(ui, "Base URL", &mut self.config.pipeline.vision.base_url);
-            labeled_field(
-                ui,
-                "API key env",
-                &mut self.config.pipeline.vision.api_key_env,
-            );
+            ui_api_key_field(ui, &mut self.config.pipeline.vision.api_key);
 
             ui.horizontal(|ui| {
                 ui.label("Model");
@@ -815,9 +813,19 @@ impl GalMasterApp {
                 &mut self.config.pipeline.translate.target_lang,
             );
 
+            ui.separator();
+            ui_context_settings(ui, &mut self.config.pipeline.translate);
+
+            ui.separator();
+            ui_structured_output_settings(ui, &mut self.config.pipeline.vision);
+
+            ui.separator();
+            ui_sampling_settings(ui, &mut self.config.pipeline.vision.sampling);
+
+            let has_key = Config::has_api_key(&self.config.pipeline.vision.api_key);
             if prev_provider != self.config.pipeline.vision.provider
                 || prev_base != self.config.pipeline.vision.base_url
-                || prev_key_env != self.config.pipeline.vision.api_key_env
+                || prev_has_key != has_key
             {
                 self.models_fetch_key.clear();
             }
@@ -1166,5 +1174,219 @@ fn labeled_field(ui: &mut egui::Ui, label: &str, value: &mut String) {
     ui.horizontal(|ui| {
         ui.label(label);
         ui.add(egui::TextEdit::singleline(value).desired_width(220.0));
+    });
+}
+
+/// Single API key field (config `api_key`).
+/// OpenAI: `Authorization: Bearer`; Anthropic: `x-api-key`.
+fn ui_api_key_field(ui: &mut egui::Ui, api_key: &mut Option<String>) {
+    let mut key_buf = api_key.clone().unwrap_or_default();
+    ui.horizontal(|ui| {
+        ui.label("API key").on_hover_text(
+            "Saved as api_key in config.toml. OpenAI uses Authorization Bearer; Anthropic uses x-api-key.",
+        );
+        let resp = ui.add(
+            egui::TextEdit::singleline(&mut key_buf)
+                .desired_width(220.0)
+                .password(true)
+                .hint_text("sk-…"),
+        );
+        if resp.changed() {
+            let t = key_buf.trim().to_string();
+            *api_key = if t.is_empty() { None } else { Some(t) };
+        }
+        if ui
+            .small_button("Clear")
+            .on_hover_text("Clear API key")
+            .clicked()
+        {
+            *api_key = None;
+            key_buf.clear();
+        }
+    });
+    if Config::has_api_key(api_key) {
+        ui.colored_label(egui::Color32::from_rgb(90, 180, 110), "Key: set");
+    } else {
+        ui.colored_label(
+            egui::Color32::from_rgb(220, 120, 80),
+            "Key: missing (cloud APIs need a key)",
+        );
+    }
+}
+
+fn ui_structured_output_settings(ui: &mut egui::Ui, vision: &mut StageProviderConfig) {
+    ui.checkbox(
+        &mut vision.structured_repair,
+        "Retry once if JSON invalid",
+    )
+    .on_hover_text(
+        "When the model returns non-JSON, send one text-only repair request (no re-upload of the image).",
+    );
+    ui.checkbox(
+        &mut vision.json_object_mode,
+        "JSON object mode (OpenAI-compatible)",
+    )
+    .on_hover_text(
+        "Sends response_format: json_object. Improves structure reliability on supporting servers; others may return HTTP 400.",
+    );
+    if vision.json_object_mode {
+        ui.small("Some OpenAI-compatible gateways reject response_format — uncheck if you get 400.");
+    }
+}
+
+fn ui_context_settings(ui: &mut egui::Ui, translate: &mut TranslateStageConfig) {
+    ui.checkbox(&mut translate.context_enabled, "Keep translation context")
+        .on_hover_text(
+            "Pass previous subtitle lines into the VLM for disambiguation. Cleared on Start.",
+        );
+    if translate.context_enabled {
+        ui.horizontal(|ui| {
+            ui.label("Max lines");
+            ui.add(
+                egui::DragValue::new(&mut translate.max_context_lines)
+                    .range(0..=20)
+                    .speed(0.2),
+            );
+            ui.label("Mode");
+            egui::ComboBox::from_id_salt("context_mode")
+                .selected_text(match translate.context_mode {
+                    ContextMode::Original => "Original",
+                    ContextMode::Translated => "Translated",
+                    ContextMode::Bilingual => "Bilingual",
+                })
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(
+                        &mut translate.context_mode,
+                        ContextMode::Bilingual,
+                        "Bilingual",
+                    );
+                    ui.selectable_value(
+                        &mut translate.context_mode,
+                        ContextMode::Original,
+                        "Original",
+                    );
+                    ui.selectable_value(
+                        &mut translate.context_mode,
+                        ContextMode::Translated,
+                        "Translated",
+                    );
+                });
+        });
+        ui.small("Bilingual stores `src → tgt` per line. 0 lines = off. Start clears history.");
+    }
+}
+
+/// Optional sampling fields: checkbox enables override; unchecked omits the field from the API body.
+fn ui_sampling_settings(ui: &mut egui::Ui, sampling: &mut LlmSamplingParams) {
+    egui::CollapsingHeader::new("Advanced model parameters")
+        .default_open(false)
+        .show(ui, |ui| {
+            ui.small(
+                "Unchecked = omit from request (server default). \
+                 Official Anthropic requires Max tokens; set it if needed. \
+                 top_k / reasoning_effort may be rejected by some endpoints.",
+            );
+
+            optional_f32(ui, "Temperature", &mut sampling.temperature, 0.0..=2.0, 0.1);
+            optional_f32(ui, "Top-p", &mut sampling.top_p, 0.0..=1.0, 0.9);
+            optional_u32(ui, "Top-k", &mut sampling.top_k, 1..=200, 40);
+            optional_u32(ui, "Max tokens", &mut sampling.max_tokens, 16..=8192, 512);
+            optional_f32(
+                ui,
+                "Frequency penalty",
+                &mut sampling.frequency_penalty,
+                -2.0..=2.0,
+                0.0,
+            );
+            optional_f32(
+                ui,
+                "Presence penalty",
+                &mut sampling.presence_penalty,
+                -2.0..=2.0,
+                0.0,
+            );
+            optional_i64(ui, "Seed", &mut sampling.seed, 0);
+
+            ui.horizontal(|ui| {
+                let mut set = sampling
+                    .reasoning_effort
+                    .as_ref()
+                    .map(|s| !s.is_empty())
+                    .unwrap_or(false);
+                if ui.checkbox(&mut set, "Reasoning effort").changed() {
+                    if set {
+                        sampling.reasoning_effort = Some("low".into());
+                    } else {
+                        sampling.reasoning_effort = None;
+                    }
+                }
+                if set {
+                    let current = sampling
+                        .reasoning_effort
+                        .clone()
+                        .unwrap_or_else(|| "low".into());
+                    egui::ComboBox::from_id_salt("reasoning_effort")
+                        .selected_text(&current)
+                        .show_ui(ui, |ui| {
+                            for v in ["none", "low", "medium", "high", "xhigh"] {
+                                if ui.selectable_label(current == v, v).clicked() {
+                                    sampling.reasoning_effort = Some(v.into());
+                                }
+                            }
+                        });
+                }
+            });
+        });
+}
+
+fn optional_f32(
+    ui: &mut egui::Ui,
+    label: &str,
+    value: &mut Option<f32>,
+    range: std::ops::RangeInclusive<f32>,
+    default_when_enabled: f32,
+) {
+    ui.horizontal(|ui| {
+        let mut set = value.is_some();
+        if ui.checkbox(&mut set, label).changed() {
+            *value = if set { Some(default_when_enabled) } else { None };
+        }
+        if let Some(v) = value.as_mut() {
+            ui.add(egui::Slider::new(v, range));
+        }
+    });
+}
+
+fn optional_u32(
+    ui: &mut egui::Ui,
+    label: &str,
+    value: &mut Option<u32>,
+    range: std::ops::RangeInclusive<u32>,
+    default_when_enabled: u32,
+) {
+    ui.horizontal(|ui| {
+        let mut set = value.is_some();
+        if ui.checkbox(&mut set, label).changed() {
+            *value = if set { Some(default_when_enabled) } else { None };
+        }
+        if let Some(v) = value.as_mut() {
+            ui.add(egui::DragValue::new(v).range(range));
+        }
+    });
+}
+
+fn optional_i64(ui: &mut egui::Ui, label: &str, value: &mut Option<i64>, default_when_enabled: i64) {
+    ui.horizontal(|ui| {
+        let mut set = value.is_some();
+        if ui.checkbox(&mut set, label).changed() {
+            *value = if set {
+                Some(default_when_enabled)
+            } else {
+                None
+            };
+        }
+        if let Some(v) = value.as_mut() {
+            ui.add(egui::DragValue::new(v));
+        }
     });
 }
