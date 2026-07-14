@@ -41,12 +41,12 @@ Workflow: [`.github/workflows/release.yml`](.github/workflows/release.yml)
 
 | Event | Result |
 |-------|--------|
-| **Push to `main` / `master`** | Build Linux / Windows / macOS → update prerelease **`continuous`** |
+| **Push to `main` / `master`** | Build Linux / Windows → update prerelease **`continuous`** |
 | **Push tag `v*`** (e.g. `v0.1.0`) | Same builds → versioned **GitHub Release** |
 | **Pull request** | Build only (no release) |
 | **workflow_dispatch** | Same as push to default branch |
 
-Platforms: `linux-x86_64`, `windows-x86_64` (MSVC), `macos-aarch64`, `macos-x86_64`.
+Platforms: `linux-x86_64`, `windows-x86_64` (MSVC).
 
 ```bash
 # Publish a stable release after merging to main
