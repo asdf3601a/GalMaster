@@ -1,10 +1,10 @@
 # Build multi-platform GalMaster binaries and publish a GitHub Release.
 #
 # Triggers:
-#   - push to main/master  → prerelease tag "continuous" (always updated)
-#   - push tag v*          → versioned release (e.g. v0.1.0)
+#   - push to main/master  → new prerelease per commit (tag continuous-<sha>)
+#   - push tag v*          → versioned stable release (e.g. v0.1.0)
 #   - pull_request         → build only (no release)
-#   - workflow_dispatch    → same as push to default branch
+#   - workflow_dispatch    → same as push to default branch (new prerelease)
 #
 name: Release
 
@@ -209,8 +209,8 @@ jobs:
             MAKE_LATEST=true
             BODY_KIND=tag
           else
-            # Continuous build for main/master / manual runs
-            TAG="continuous"
+            # One prerelease per commit (main/master / workflow_dispatch)
+            TAG="continuous-${SHORT_SHA}"
             NAME="GalMaster continuous (${SHORT_SHA})"
             PRERELEASE=true
             MAKE_LATEST=false
@@ -241,7 +241,7 @@ jobs:
               echo "Auto-published from \`${GITHUB_REF_NAME}\` @ \`${{ steps.meta.outputs.short_sha }}\`."
               echo "Cargo workspace version: \`${{ steps.meta.outputs.cargo_version }}\`."
               echo
-              echo "This prerelease is **replaced on every push** to main/master."
+              echo "Each push to main/master creates a **new** prerelease (\`continuous-<sha>\`)."
               echo "Prefer a \`v*\` tag for stable releases."
             fi
             echo
@@ -287,7 +287,7 @@ jobs:
           make_latest: ${{ steps.meta.outputs.make_latest }}
           files: artifacts/*
           fail_on_unmatched_files: true
-          # Refresh assets when re-running continuous or re-tagging
+          # Same-commit re-runs update assets on that tag (tags are unique per SHA)
           overwrite_files: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

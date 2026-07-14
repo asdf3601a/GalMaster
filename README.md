@@ -45,10 +45,10 @@ Workflow: [`.github/workflows/release.yml`](.github/workflows/release.yml)
 
 | Event | Result |
 |-------|--------|
-| **Push to `main` / `master`** | Build Linux / Windows → update prerelease **`continuous`** |
-| **Push tag `v*`** (e.g. `v0.1.0`) | Same builds → versioned **GitHub Release** |
+| **Push to `main` / `master`** | Build Linux / Windows → **new** prerelease `continuous-<sha>` |
+| **Push tag `v*`** (e.g. `v0.1.0`) | Same builds → versioned stable **GitHub Release** |
 | **Pull request** | Build only (no release) |
-| **workflow_dispatch** | Same as push to default branch |
+| **workflow_dispatch** | Same as branch push → new prerelease |
 
 Shipped assets: `linux-x86_64`, `windows-x86_64` (MSVC).
 
@@ -58,7 +58,7 @@ git tag v0.1.0
 git push origin v0.1.0
 ```
 
-Download from the repo **Releases** page (or the `continuous` prerelease for the latest main build).
+Download from the repo **Releases** page: newest `continuous-<sha>` prerelease for tip-of-main, or a `v*` release for stable.
 
 ### Build & run (from source)
 
