@@ -17,15 +17,6 @@ impl FrameGateDecision {
     pub fn should_process(self) -> bool {
         matches!(self, Self::Process)
     }
-
-    /// Short status line for the UI when not processing.
-    pub fn waiting_status(self) -> Option<&'static str> {
-        match self {
-            Self::SkipUnchanged => Some("Waiting — frame unchanged"),
-            Self::SkipStabilizing => Some("Waiting — frame stabilizing"),
-            Self::Process => None,
-        }
-    }
 }
 
 /// Wait for ROI stillness, then allow one model call per stable scene.
@@ -78,30 +69,26 @@ impl FrameGate {
             }
         }
 
-        if let Some(p) = &self.pending {
-            if samples_similar(p, &sample, self.pixel_diff_threshold) {
-                self.pending_count = self.pending_count.saturating_add(1);
-                self.pending = Some(sample.clone());
-                if self.pending_count >= self.stable_frames {
-                    self.last_processed = Some(sample);
-                    self.pending = None;
-                    self.pending_count = 0;
-                    return FrameGateDecision::Process;
-                }
-                return FrameGateDecision::SkipStabilizing;
-            }
-        }
+        let matches_pending = self
+            .pending
+            .as_ref()
+            .is_some_and(|p| samples_similar(p, &sample, self.pixel_diff_threshold));
 
-        // Novel vs pending (or no pending yet) — restart stillness window.
+        if matches_pending {
+            self.pending_count = self.pending_count.saturating_add(1);
+        } else {
+            self.pending_count = 1;
+        }
         self.pending = Some(sample.clone());
-        self.pending_count = 1;
-        if self.stable_frames <= 1 {
+
+        if self.pending_count >= self.stable_frames {
             self.last_processed = Some(sample);
             self.pending = None;
             self.pending_count = 0;
-            return FrameGateDecision::Process;
+            FrameGateDecision::Process
+        } else {
+            FrameGateDecision::SkipStabilizing
         }
-        FrameGateDecision::SkipStabilizing
     }
 
     /// Convenience: true only when [`FrameGateDecision::Process`].
@@ -117,16 +104,13 @@ impl FrameGate {
 }
 
 fn samples_similar(a: &[u8], b: &[u8], threshold: f32) -> bool {
-    if a == b {
-        return true;
-    }
-    if fnv1a64(a) == fnv1a64(b) {
-        return true;
-    }
-    mean_abs_diff(a, b) < threshold
+    a == b || mean_abs_diff(a, b) < threshold
 }
 
 /// Stabilize extracted text: require consensus frames + novelty vs last accepted.
+///
+/// Not used on the live vision-e2e path (see [`crate::pipeline::GateBundle`]);
+/// kept for unit tests and a possible future OCR pipeline.
 #[derive(Debug, Clone)]
 pub struct TextGate {
     pub similarity_skip: f32,
@@ -175,28 +159,25 @@ impl TextGate {
             }
         }
 
-        match &self.pending {
-            Some(p) if similarity(p, &text) >= self.similarity_skip as f64 => {
-                self.pending_count += 1;
-                // Refresh pending to latest OCR noise-smoothed form
-                self.pending = Some(text.clone());
-                if self.pending_count >= self.stable_frames {
-                    self.last_accepted = Some(text.clone());
-                    self.pending_count = 0;
-                    return Some(text);
-                }
-            }
-            _ => {
-                self.pending = Some(text);
-                self.pending_count = 1;
-                if self.stable_frames <= 1 {
-                    let t = self.pending.clone().unwrap();
-                    self.last_accepted = Some(t.clone());
-                    return Some(t);
-                }
-            }
+        let matches_pending = self
+            .pending
+            .as_ref()
+            .is_some_and(|p| similarity(p, &text) >= self.similarity_skip as f64);
+
+        if matches_pending {
+            self.pending_count = self.pending_count.saturating_add(1);
+        } else {
+            self.pending_count = 1;
         }
-        None
+        self.pending = Some(text.clone());
+
+        if self.pending_count >= self.stable_frames {
+            self.last_accepted = Some(text.clone());
+            self.pending_count = 0;
+            Some(text)
+        } else {
+            None
+        }
     }
 
     pub fn reset(&mut self) {
@@ -303,17 +284,6 @@ fn mean_abs_diff(a: &[u8], b: &[u8]) -> f32 {
     ((sum as f32 + len_pen) / (n as f32 * 255.0)).min(1.0)
 }
 
-fn fnv1a64(data: &[u8]) -> u64 {
-    const FNV_OFFSET: u64 = 0xcbf29ce484222325;
-    const FNV_PRIME: u64 = 0x100000001b3;
-    let mut hash = FNV_OFFSET;
-    for b in data {
-        hash ^= *b as u64;
-        hash = hash.wrapping_mul(FNV_PRIME);
-    }
-    hash
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -394,6 +364,14 @@ mod tests {
         assert!(gate.push("こんにちは").is_none());
         // High similarity should count toward consensus
         assert_eq!(gate.push("こんにちは").as_deref(), Some("こんにちは"));
+    }
+
+    #[test]
+    fn text_gate_stable_one_fires_immediately() {
+        let mut gate = TextGate::new(0.92, 1);
+        assert_eq!(gate.push("hello").as_deref(), Some("hello"));
+        assert!(gate.push("hello").is_none());
+        assert_eq!(gate.push("world").as_deref(), Some("world"));
     }
 
     #[test]

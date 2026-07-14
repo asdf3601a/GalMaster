@@ -22,19 +22,10 @@ pub trait VisionUnderstanding: Send {
 }
 
 /// Options for vision e2e (sampling + structured-output policy).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct VisionE2eOptions {
     pub sampling: LlmSamplingParams,
     pub structured: StructuredOutputConfig,
-}
-
-impl Default for VisionE2eOptions {
-    fn default() -> Self {
-        Self {
-            sampling: LlmSamplingParams::default(),
-            structured: StructuredOutputConfig::default(),
-        }
-    }
 }
 
 pub struct VisionE2e {

@@ -425,12 +425,17 @@ impl TranslateStageConfig {
     }
 }
 
+/// Gates for the live vision-e2e path.
+///
+/// - `pixel_diff_threshold` / `stable_frames` → [`crate::gate::FrameGate`] (ROI stillness)
+/// - `text_similarity_skip` → [`crate::gate::ResultGate`] (post-VLM dedup)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GateConfig {
     #[serde(default = "default_pixel_diff")]
     pub pixel_diff_threshold: f32,
     #[serde(default = "default_text_sim")]
     pub text_similarity_skip: f32,
+    /// Consecutive similar ROI frames required before a VLM call (frame stillness only).
     #[serde(default = "default_stable_frames")]
     pub stable_frames: u32,
 }

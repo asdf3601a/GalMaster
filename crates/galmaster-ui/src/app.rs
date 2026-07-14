@@ -841,12 +841,16 @@ impl GalMasterApp {
         ui.add(
             egui::Slider::new(&mut self.config.gate.text_similarity_skip, 0.5..=1.0)
                 .text("text similarity"),
+        )
+        .on_hover_text(
+            "After a VLM result: skip publishing if original+translated is this similar \
+             to the last accepted result.",
         );
         ui.add(
             egui::Slider::new(&mut self.config.gate.stable_frames, 1..=5).text("stable frames"),
         )
         .on_hover_text(
-            "Require N consecutive similar ROI frames before calling the VLM. \
+            "ROI stillness only: require N consecutive similar frames before calling the VLM. \
              While the scene is still animating (typing text, fades), the counter \
              resets — only fires after the picture holds still. 1 = fire on first change.",
         );

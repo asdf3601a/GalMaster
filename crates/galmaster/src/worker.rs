@@ -2,6 +2,7 @@
 
 use galmaster_capture::{capture_frame_scaled, CaptureTarget};
 use galmaster_core::config::Config;
+use galmaster_core::gate::FrameGateDecision;
 use galmaster_core::pipeline::{apply_control, GateBundle, PipelineHandle};
 use galmaster_core::types::{
     ControlMessage, LatencyBreakdown, PipelineProfileKind, TranslationEvent, UnderstandContext,
@@ -119,7 +120,7 @@ pub async fn run_worker(
                 };
                 let decision = gates.frame.evaluate(&frame);
                 if !decision.should_process() {
-                    if let Some(msg) = decision.waiting_status() {
+                    if let Some(msg) = frame_gate_waiting_status(decision) {
                         let s = handle.status_text();
                         if s != msg {
                             handle.set_status(msg);
@@ -217,6 +218,14 @@ async fn process_vision_e2e(
         PipelineProfileKind::VisionE2e,
         latency,
     )))
+}
+
+fn frame_gate_waiting_status(decision: FrameGateDecision) -> Option<&'static str> {
+    match decision {
+        FrameGateDecision::SkipUnchanged => Some("Waiting — frame unchanged"),
+        FrameGateDecision::SkipStabilizing => Some("Waiting — frame stabilizing"),
+        FrameGateDecision::Process => None,
+    }
 }
 
 fn push_context(lines: &mut Vec<String>, line: String, max: usize) {

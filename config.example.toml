@@ -53,10 +53,10 @@ json_object = false
 [gate]
 # Mean luma diff below this = "same frame" (skip / count toward stillness).
 pixel_diff_threshold = 0.01
-# After VLM: skip if original+translated is this similar to last accepted.
+# After VLM: skip if original+translated is this similar to last accepted (ResultGate).
 text_similarity_skip = 0.92
-# Consecutive similar frames required before VLM (wait for stillness while animating).
-# 1 = fire on first novel frame; 2+ = debounce mid-animation.
+# ROI stillness only: consecutive similar frames required before VLM.
+# 1 = fire on first novel frame; 2+ = debounce mid-animation (typing/fades).
 stable_frames = 2
 
 [obs]

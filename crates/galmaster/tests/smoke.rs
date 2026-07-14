@@ -3,7 +3,7 @@
 use galmaster_capture::{capture_frame, crop_norm, list_windows, CaptureTarget};
 use galmaster_core::config::WindowMatchMode;
 use galmaster_core::config::Config;
-use galmaster_core::gate::{FrameGate, ResultGate, TextGate};
+use galmaster_core::gate::{FrameGate, ResultGate};
 use galmaster_core::pipeline::Pipeline;
 use galmaster_core::style::SubtitleStyle;
 use galmaster_core::types::{
@@ -41,7 +41,6 @@ fn style_color_parse() {
 #[test]
 fn gates_latest_wins_semantics() {
     let mut fg = FrameGate::new(0.01, 2);
-    let mut tg = TextGate::new(0.92, 2);
     let mut rg = ResultGate::new(0.92);
 
     let f1 = solid(10, 20, 30);
@@ -54,10 +53,6 @@ fn gates_latest_wins_semantics() {
     // New scene needs two stable frames as well.
     assert!(!fg.should_process(&f3));
     assert!(fg.should_process(&f3));
-
-    assert!(tg.push("hello").is_none());
-    assert_eq!(tg.push("hello").as_deref(), Some("hello"));
-    assert!(tg.push("hello").is_none());
 
     assert!(rg.accept(Some("a"), "甲"));
     assert!(!rg.accept(Some("a"), "甲"));

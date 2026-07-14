@@ -5,7 +5,7 @@
 //! queue semantics.
 
 use crate::config::Config;
-use crate::gate::{FrameGate, ResultGate, TextGate};
+use crate::gate::{FrameGate, ResultGate};
 use crate::types::{
     ControlMessage, Frame, LatencyBreakdown, PipelineProfileKind, TranslationEvent,
 };
@@ -161,10 +161,12 @@ impl Pipeline {
     }
 }
 
-/// Shared gate state rebuilt from config.
+/// Shared gate state for the live vision-e2e path, rebuilt from config.
+///
+/// `stable_frames` is frame-only (ROI stillness). Result dedup uses
+/// `text_similarity_skip`. OCR [`crate::gate::TextGate`] is not on this path.
 pub struct GateBundle {
     pub frame: FrameGate,
-    pub text: TextGate,
     pub result: ResultGate,
 }
 
@@ -172,7 +174,6 @@ impl GateBundle {
     pub fn from_config(cfg: &Config) -> Self {
         Self {
             frame: FrameGate::new(cfg.gate.pixel_diff_threshold, cfg.gate.stable_frames),
-            text: TextGate::new(cfg.gate.text_similarity_skip, cfg.gate.stable_frames),
             result: ResultGate::new(cfg.gate.text_similarity_skip),
         }
     }
@@ -206,7 +207,6 @@ pub async fn apply_control(
             info!("pipeline start");
             let _ = running.send(true);
             gates.frame.reset();
-            gates.text.reset();
             gates.result.reset();
         }
         ControlMessage::Stop => {
@@ -214,7 +214,6 @@ pub async fn apply_control(
             let _ = running.send(false);
             cancel.cancel();
             gates.frame.reset();
-            gates.text.reset();
             gates.result.reset();
         }
         ControlMessage::UpdateConfig(cfg) => {

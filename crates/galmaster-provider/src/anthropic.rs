@@ -137,9 +137,7 @@ impl AnthropicClient {
 /// Accepts `https://api.anthropic.com`, `…/v1`, or a full `…/v1/messages`.
 pub fn anthropic_messages_url(base_url: &str) -> String {
     let base = base_url.trim().trim_end_matches('/');
-    if base.ends_with("/v1/messages") {
-        base.to_string()
-    } else if base.ends_with("/messages") {
+    if base.ends_with("/v1/messages") || base.ends_with("/messages") {
         base.to_string()
     } else if base.contains("/v1") {
         format!("{base}/messages")
