@@ -2,6 +2,9 @@
 
 Real-time **window/ROI capture → subtitle extract → translate → overlay / OBS**, written in Rust.
 
+<img width="3840" height="2160" alt="圖片" src="https://github.com/user-attachments/assets/58537fdc-1b10-4a8a-b849-0ee9e5594209" />
+
+
 ## Principles
 
 1. **Human control stops at ROI** — pick a window and box the subtitle band.
