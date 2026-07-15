@@ -1,0 +1,6 @@
+# Dependencies are managed by uv via pyproject.toml + uv.lock.
+# Install:
+#   uv sync --extra dev
+#
+# Export a frozen requirements list (optional):
+#   uv export --no-dev -o requirements.freeze.txt

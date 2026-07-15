@@ -1,0 +1,41 @@
+# Python / uv
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+env/
+.env
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+uv.lock.bak
+
+# Local config / secrets (tool dir)
+config.json
+config.local.json
+*.local.json
+last_capture.png
+debug_ocr/
+models/
+
+# IDE / OS
+.idea/
+.vscode/
+*.swp
+.DS_Store
+Thumbs.db
+
+# OCR model caches
+.cache/
+~/.manga_ocr/
+
+# Snipping Tool OneOCR runtime (copied from ScreenSketch; ~100MB)
+tools/oneocr/
+tools/wasdk/*.dll
+tools/wasdk_ocr/*.dll
