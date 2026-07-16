@@ -72,7 +72,9 @@ XAI_API_KEY=...
 ### LLM 進階參數
 
 temperature / top_p / top_k / frequency_penalty / presence_penalty / reasoning_effort / seed 等可在 UI 勾選後送出。  
-**未勾選的參數不會出現在 API JSON**（避免閘道拒收）。
+**未勾選的參數不會出現在 API JSON**（避免閘道拒收）。  
+
+> **行為變更**：先前固定送 `temperature=0.2`；現在預設**不送** temperature（由供應商預設，常見約 1.0）。若需要較穩定的對白翻譯，請在「進階參數」勾選 temperature 並設為 `0.2`。
 
 ### 自動監控節流
 
@@ -89,7 +91,7 @@ temperature / top_p / top_k / frequency_penalty / presence_penalty / reasoning_e
 
 1. 勾選 **啟用 OBS 伺服器**，設定連接埠（預設 `8765`）→ **套用**  
 2. OBS → 來源 → **瀏覽器** → URL：`http://127.0.0.1:8765/`  
-3. 可加 `?size=32` 或 `?source=1` 調整字級／顯示原文  
+3. 原文／譯文顯示、字型、字級、顏色、面板背景等在主視窗 **OBS 字幕** 群組調整；樣式經 SSE／輪詢即時更新，**不必重新整理** Browser Source  
 
 僅綁定本機 loopback。
 

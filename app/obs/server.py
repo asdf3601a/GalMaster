@@ -139,23 +139,46 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
     }
   }
 
-  function poll() {
-    fetch("/api/state", {cache: "no-store"})
-      .then(r => r.json())
-      .then(st => {
-        const j = JSON.stringify(st);
-        if (j !== lastJson) {
-          lastJson = j;
-          apply(st);
-        }
-      })
-      .catch(() => {})
-      .finally(() => setTimeout(poll, 500));
+  let pollTimer = null;
+  let usePoll = false;
+
+  function stopPoll() {
+    if (pollTimer !== null) {
+      clearTimeout(pollTimer);
+      pollTimer = null;
+    }
+    usePoll = false;
+  }
+
+  function startPoll() {
+    if (usePoll) return;
+    usePoll = true;
+    function tick() {
+      if (!usePoll) return;
+      fetch("/api/state", {cache: "no-store"})
+        .then(r => r.json())
+        .then(st => {
+          const j = JSON.stringify(st);
+          if (j !== lastJson) {
+            lastJson = j;
+            apply(st);
+          }
+        })
+        .catch(() => {})
+        .finally(() => {
+          if (usePoll) pollTimer = setTimeout(tick, 500);
+        });
+    }
+    tick();
   }
 
   function connectSse() {
     try {
       const es = new EventSource("/events");
+      es.onopen = function () {
+        // SSE works — stop any poll fallback
+        stopPoll();
+      };
       es.onmessage = (ev) => {
         try {
           const st = JSON.parse(ev.data);
@@ -164,16 +187,18 @@ _HTML_TEMPLATE = """<!DOCTYPE html>
         } catch (e) {}
       };
       es.onerror = () => {
-        es.close();
+        try { es.close(); } catch (e) {}
+        // Fall back to poll while reconnecting
+        startPoll();
         setTimeout(connectSse, 1500);
       };
     } catch (e) {
-      poll();
+      startPoll();
     }
   }
 
+  // Prefer SSE; poll only after EventSource errors (or if construction fails)
   connectSse();
-  poll();
 })();
 </script>
 </body>

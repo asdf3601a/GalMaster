@@ -65,3 +65,18 @@ def test_monitor_start_stop_start(qapp):
         time.sleep(0.15)
         mon.stop()
         assert not mon.is_running
+
+
+def test_monitor_per_generation_stop_event(qapp):
+    """start() must use a new Event so a late zombie cannot be revived by clear()."""
+    mon = RegionMonitor()
+    cfg = AppConfig(region_w=4, region_h=4, monitor_interval_ms=200, monitor_stable_ms=0)
+    mon.start(cfg)
+    ev1 = mon._stop
+    mon.stop()
+    mon.start(cfg)
+    ev2 = mon._stop
+    assert ev1 is not ev2
+    assert ev1.is_set()
+    assert not ev2.is_set()
+    mon.stop()

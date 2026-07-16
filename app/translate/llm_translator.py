@@ -113,6 +113,38 @@ def build_chat_messages(
     return messages
 
 
+def build_vlm_history_messages(
+    history: list[tuple[str, str]] | None = None,
+) -> list[dict[str, str]]:
+    """
+    Prior VLM turns as SOURCE/TRANSLATION text (no OCR-style translate prompts).
+    Images from prior turns are not re-sent (token cost).
+    """
+    messages: list[dict[str, str]] = []
+    for src, tgt in history or []:
+        src = (src or "").strip()
+        tgt = (tgt or "").strip()
+        if not src and not tgt:
+            continue
+        user_block = f"SOURCE: {src or '(unknown)'}\nTRANSLATION: {tgt or src or ''}"
+        messages.append(
+            {
+                "role": "user",
+                "content": (
+                    "Previous dialogue line (for context only; do not re-translate):\n"
+                    + user_block
+                ),
+            }
+        )
+        messages.append(
+            {
+                "role": "assistant",
+                "content": user_block,
+            }
+        )
+    return messages
+
+
 def parse_vlm_response(raw: str) -> tuple[str, str]:
     """
     Parse SOURCE:/TRANSLATION: blocks. On failure, treat whole string as translation.
@@ -453,15 +485,8 @@ class LLMTranslator:
         b64, media_type = image_to_jpeg_b64(img)
         user_text = build_vlm_user_prompt(source_lang, target_lang)
 
-        # Text history as prior turns, then current image user message
-        history_msgs = build_chat_messages(
-            "__VLM_PLACEHOLDER__",
-            source_lang,
-            target_lang,
-            history=history or [],
-        )
-        # Drop the placeholder current user message from history builder
-        history_msgs = history_msgs[:-1]
+        # Text history as prior SOURCE/TRANSLATION turns, then current image message
+        history_msgs = build_vlm_history_messages(history or [])
 
         if self.protocol == "anthropic":
             raw = self._vlm_anthropic(system, history_msgs, user_text, b64, media_type)

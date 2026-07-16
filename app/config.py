@@ -239,7 +239,7 @@ class AppConfig:
         cfg.pipeline_mode = mode if mode in ("ocr", "vlm") else "ocr"
         ui_lang = (getattr(cfg, "ui_language", "zh-Hant") or "zh-Hant").strip()
         cfg.ui_language = ui_lang if ui_lang in ("zh-Hant", "en") else "zh-Hant"
-        # Coerce optional sampling fields: empty string → None for numeric optionals
+        # Coerce optional sampling fields: empty string / bad values → None
         for opt in (
             "temperature",
             "top_p",
@@ -251,9 +251,19 @@ class AppConfig:
             val = getattr(cfg, opt, None)
             if val is None or val == "":
                 setattr(cfg, opt, None)
-        # top_k 0 means "unset" (same as null)
-        if getattr(cfg, "top_k", None) is not None and int(cfg.top_k) <= 0:
-            cfg.top_k = None
+                continue
+            try:
+                if opt in ("top_k", "seed"):
+                    iv = int(val)
+                    # top_k 0 means "unset" (same as null)
+                    if opt == "top_k" and iv <= 0:
+                        setattr(cfg, opt, None)
+                    else:
+                        setattr(cfg, opt, iv)
+                else:
+                    setattr(cfg, opt, float(val))
+            except (TypeError, ValueError):
+                setattr(cfg, opt, None)
         effort = getattr(cfg, "reasoning_effort", None)
         if effort is None:
             cfg.reasoning_effort = ""

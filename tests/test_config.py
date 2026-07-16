@@ -154,9 +154,29 @@ def test_style_color_and_align_normalize():
             "overlay_show_source": False,
             "overlay_show_translation": False,
             "obs_bg_alpha": 999,
+            "overlay_bg_alpha": 0,
         }
     )
     assert c.overlay_source_color == "#ffffff"
     assert c.overlay_text_align == "center"
     assert c.overlay_show_translation is True  # forced at least one
     assert c.obs_bg_alpha == 255
+    assert c.overlay_bg_alpha == 0  # zero is valid (fully transparent)
+
+
+def test_from_dict_bad_sampling_does_not_drop_config():
+    c = AppConfig.from_dict(
+        {
+            "api_key": "sk-test",
+            "model": "keep-me",
+            "top_k": "abc",
+            "temperature": "nope",
+            "region_w": 100,
+            "region_h": 40,
+        }
+    )
+    assert c.api_key == "sk-test"
+    assert c.model == "keep-me"
+    assert c.top_k is None
+    assert c.temperature is None
+    assert c.region_w == 100

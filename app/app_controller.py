@@ -446,18 +446,22 @@ class AppController(QObject):
             pass
 
     def _sync_obs_server(self, cfg: AppConfig) -> None:
+        def _i(name: str, default: int) -> int:
+            val = getattr(cfg, name, default)
+            if val is None or val == "":
+                return default
+            try:
+                return int(val)
+            except (TypeError, ValueError):
+                return default
+
         self.obs.configure(
             show_source=bool(getattr(cfg, "obs_show_source", False)),
             show_translation=bool(getattr(cfg, "obs_show_translation", True)),
             font_family=str(getattr(cfg, "obs_font_family", "") or ""),
-            source_font_size=int(getattr(cfg, "obs_source_font_size", 20) or 20),
-            translation_font_size=int(
-                getattr(
-                    cfg,
-                    "obs_translation_font_size",
-                    getattr(cfg, "obs_font_size", 28),
-                )
-                or 28
+            source_font_size=max(10, _i("obs_source_font_size", 20)),
+            translation_font_size=max(
+                10, _i("obs_translation_font_size", _i("obs_font_size", 28))
             ),
             source_color=str(getattr(cfg, "obs_source_color", "#d8d8e0") or "#d8d8e0"),
             translation_color=str(
@@ -466,7 +470,7 @@ class AppController(QObject):
             translation_bold=bool(getattr(cfg, "obs_translation_bold", True)),
             text_align=str(getattr(cfg, "obs_text_align", "left") or "left"),
             bg_color=str(getattr(cfg, "obs_bg_color", "#000000") or "#000000"),
-            bg_alpha=int(getattr(cfg, "obs_bg_alpha", 140) or 140),
+            bg_alpha=_i("obs_bg_alpha", 140),
         )
         if getattr(cfg, "obs_enabled", False):
             port = int(getattr(cfg, "obs_port", 8765) or 8765)
@@ -497,6 +501,7 @@ class AppController(QObject):
             return
         if not (draft.base_url or "").strip():
             self.main.set_models_status(tr("models.need_url"))
+            self.main.set_status(tr("models.need_url"), busy=False)
             return
 
         self._models_fetching = True
@@ -537,18 +542,26 @@ class AppController(QObject):
     def on_monitor_status(self, msg: str) -> None:
         if self.pipeline.busy:
             return
-        # "畫面未變化" etc. are status only — main window, not overlay content
-        busy = any(
-            key in msg
-            for key in ("等待畫面穩定", "畫面仍在變化", "畫面已穩定", "開始處理")
+        # Treat "waiting for stable / about to fire" as busy for the status pill
+        busy = msg in (
+            tr("monitor.waiting_stable"),
+            tr("monitor.still_changing"),
+            tr("monitor.stable_fire"),
+            tr("monitor.change_fire"),
+            tr("monitor.cooldown"),
         )
+        if not busy:
+            # progress template: prefix before first format field
+            sample = tr("monitor.stable_progress", held="\0", need="0", pct=0)
+            prefix = sample.split("\0", 1)[0]
+            if prefix and msg.startswith(prefix):
+                busy = True
         self.main.set_status(msg, busy=busy)
-        # Do not push idle / unchanged monitor messages onto overlay text area
 
     def _on_pipeline_busy(self, busy: bool) -> None:
         self.main.set_busy(busy)
         if busy:
-            self.main.set_status("處理中…", busy=True)
+            self.main.set_status(tr("status.processing"), busy=True)
 
     def on_progress(self, msg: str) -> None:
         self.main.set_status(msg, busy=True)
@@ -560,7 +573,7 @@ class AppController(QObject):
 
         # Unchanged text / skipped: status only — never rewrite overlay content
         if result.skipped:
-            msg = result.status_message or "文字未變化"
+            msg = result.status_message or tr("pipe.unchanged")
             self.main.set_status(msg, busy=False)
             if self.overlay.isVisible():
                 self.overlay.set_status(msg)
@@ -573,29 +586,41 @@ class AppController(QObject):
         if result.error and not result.source_text:
             self.main.set_status(result.error, busy=False)
             self.main.set_result_text(result.error)
-            self.overlay.set_content(translation=result.error, status="錯誤")
-            # Do not overwrite OBS subtitle on hard errors
+            self.overlay.set_content(
+                translation=result.error, status=tr("status.error")
+            )
+            # Do not overwrite OBS subtitle on hard errors (no usable text)
             return
         if result.error and result.source_text and not result.translated_text:
             self.main.set_status(result.error, busy=False)
             self.main.set_result_text(
-                f"【原文】\n{result.source_text}\n\n（{result.error}）"
+                tr(
+                    "result.source_error",
+                    source=result.source_text,
+                    err=result.error,
+                )
             )
             self.overlay.set_content(
                 source=result.source_text,
                 translation=result.error,
                 status=result.error,
             )
+            # Keep stream in sync with soft failure (source + error as translation)
+            self.obs.publish(
+                source=result.source_text,
+                translation=result.error,
+                status="error",
+            )
             return
 
         if result.ocr_only:
-            text = f"【原文 / OCR】\n{result.source_text}\n\n（未設定 API Key，僅 OCR）"
+            text = tr("result.ocr_only", source=result.source_text)
             self.main.set_result_text(text)
-            self.main.set_status("OCR 完成（未翻譯）", busy=False)
+            self.main.set_status(tr("pipe.ocr_done"), busy=False)
             self.overlay.set_content(
                 source=result.source_text,
                 translation=result.source_text,
-                status="僅 OCR（未設定 LLM）",
+                status=tr("pipe.ocr_only_status"),
             )
             self.obs.publish(
                 source=result.source_text,
@@ -604,17 +629,19 @@ class AppController(QObject):
             )
             return
 
-        cache_tag = "（快取）" if result.from_cache else ""
-        text = (
-            f"【原文】\n{result.source_text}\n\n"
-            f"【譯文】{cache_tag}\n{result.translated_text}"
+        cache_tag = tr("pipe.cache_tag") if result.from_cache else ""
+        text = tr(
+            "result.full",
+            source=result.source_text,
+            cache=cache_tag,
+            translation=result.translated_text,
         )
         self.main.set_result_text(text)
-        self.main.set_status("完成" + cache_tag, busy=False)
+        self.main.set_status(tr("pipe.done") + cache_tag, busy=False)
         self.overlay.set_content(
             source=result.source_text,
             translation=result.translated_text,
-            status="完成" + cache_tag,
+            status=tr("pipe.done") + cache_tag,
         )
         self.obs.publish(
             source=result.source_text,

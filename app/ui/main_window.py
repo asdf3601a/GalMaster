@@ -53,6 +53,17 @@ def _optional_int_row(*, enabled: bool, spin: NoWheelSpinBox) -> int | None:
     return int(spin.value()) if enabled else None
 
 
+def _cfg_int(cfg: AppConfig, name: str, default: int) -> int:
+    """Read int config field; 0 is valid (do not use `or default`)."""
+    val = getattr(cfg, name, default)
+    if val is None or val == "":
+        return default
+    try:
+        return int(val)
+    except (TypeError, ValueError):
+        return default
+
+
 class MainWindow(QMainWindow):
     select_region_clicked = Signal()
     refresh_windows_clicked = Signal()
@@ -733,7 +744,7 @@ class MainWindow(QMainWindow):
         self.ov_bg_alpha_spin = NoWheelSpinBox()
         self.ov_bg_alpha_spin.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.ov_bg_alpha_spin.setRange(0, 255)
-        self.ov_bg_alpha_spin.setValue(int(getattr(cfg, "overlay_bg_alpha", 210) or 210))
+        self.ov_bg_alpha_spin.setValue(_cfg_int(cfg, "overlay_bg_alpha", 210))
         self.ov_bg_alpha_spin.valueChanged.connect(self._mark_dirty)
         row_bg = QHBoxLayout()
         self.lbl_ov_bg = QLabel()
@@ -894,7 +905,7 @@ class MainWindow(QMainWindow):
         self.obs_bg_alpha_spin = NoWheelSpinBox()
         self.obs_bg_alpha_spin.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.obs_bg_alpha_spin.setRange(0, 255)
-        self.obs_bg_alpha_spin.setValue(int(getattr(cfg, "obs_bg_alpha", 140) or 140))
+        self.obs_bg_alpha_spin.setValue(_cfg_int(cfg, "obs_bg_alpha", 140))
         self.obs_bg_alpha_spin.valueChanged.connect(self._mark_dirty)
         row_obs_bg = QHBoxLayout()
         self.lbl_obs_bg = QLabel()
@@ -1181,9 +1192,7 @@ class MainWindow(QMainWindow):
                 getattr(cfg, "overlay_text_align", "left") or "left",
             )
             self.ov_bg_color_btn.set_color(getattr(cfg, "overlay_bg_color", "#14141c"))
-            self.ov_bg_alpha_spin.setValue(
-                int(getattr(cfg, "overlay_bg_alpha", 210) or 210)
-            )
+            self.ov_bg_alpha_spin.setValue(_cfg_int(cfg, "overlay_bg_alpha", 210))
             self.click_through_check.setChecked(cfg.overlay_click_through)
             self._set_combo(
                 self.ocr_combo,
@@ -1302,9 +1311,7 @@ class MainWindow(QMainWindow):
                 self.obs_align_combo, getattr(cfg, "obs_text_align", "left") or "left"
             )
             self.obs_bg_color_btn.set_color(getattr(cfg, "obs_bg_color", "#000000"))
-            self.obs_bg_alpha_spin.setValue(
-                int(getattr(cfg, "obs_bg_alpha", 140) or 140)
-            )
+            self.obs_bg_alpha_spin.setValue(_cfg_int(cfg, "obs_bg_alpha", 140))
             self._update_obs_url_label()
             self._on_pipeline_mode_changed()
         finally:

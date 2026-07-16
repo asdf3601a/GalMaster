@@ -38,6 +38,10 @@ def test_obs_server_start_publish_stop():
         html = resp.read().decode("utf-8")
     assert "GalMaster OBS" in html
     assert "applyStyle" in html
+    assert "startPoll" in html
+    assert "connectSse" in html
+    # Poll is fallback, not always-on dual path at end of script
+    assert "connectSse();\n  poll();" not in html.replace("\r\n", "\n")
     srv.stop()
     assert not srv.running
 
@@ -47,3 +51,9 @@ def test_obs_configure_forces_one_visible():
     srv.configure(show_source=False, show_translation=False)
     st = srv.style_dict()
     assert st["show_translation"] is True
+
+
+def test_obs_bg_alpha_zero_preserved():
+    srv = ObsSubtitleServer()
+    srv.configure(bg_alpha=0)
+    assert srv.style_dict()["bg_alpha"] == 0

@@ -11,6 +11,7 @@ from PySide6.QtCore import QObject, Signal
 
 from app.capture.screenshot import capture_region, image_to_gray_array, mean_abs_diff
 from app.config import AppConfig
+from app.i18n import tr
 
 
 class RegionMonitor(QObject):
@@ -23,6 +24,9 @@ class RegionMonitor(QObject):
     def __init__(self, parent: QObject | None = None) -> None:
         super().__init__(parent)
         self._thread: threading.Thread | None = None
+        self._zombie: threading.Thread | None = None
+        # Current generation's stop flag. Each start() creates a new Event so a
+        # timed-out join cannot revive an abandoned loop when the next start clears it.
         self._stop = threading.Event()
         self._lock = threading.RLock()
         self._cfg: AppConfig | None = None
@@ -40,7 +44,10 @@ class RegionMonitor(QObject):
     @property
     def is_running(self) -> bool:
         t = self._thread
-        return t is not None and t.is_alive()
+        if t is not None and t.is_alive():
+            return True
+        z = self._zombie
+        return z is not None and z.is_alive()
 
     def configure(self, cfg: AppConfig) -> None:
         with self._lock:
@@ -69,13 +76,35 @@ class RegionMonitor(QObject):
             self._pending_change = False
             self._stable_since = None
 
+    def _reclaim_zombie(self, timeout: float = 2.0) -> bool:
+        z = self._zombie
+        if z is None:
+            return True
+        if not z.is_alive():
+            self._zombie = None
+            return True
+        z.join(timeout=timeout)
+        if z.is_alive():
+            return False
+        self._zombie = None
+        return True
+
     def start(self, cfg: AppConfig) -> None:
+        if not self._reclaim_zombie(2.0):
+            self.error.emit(tr("monitor.zombie"))
+            return
         self.stop()
+        if not self._reclaim_zombie(1.0):
+            self.error.emit(tr("monitor.zombie"))
+            return
+
         self.configure(cfg)
         self.reset_baseline()
-        self._stop.clear()
+        stop_ev = threading.Event()
+        self._stop = stop_ev
         t = threading.Thread(
             target=self._run_loop,
+            args=(stop_ev,),
             name="GalMaster-RegionMonitor",
             daemon=True,
         )
@@ -89,13 +118,19 @@ class RegionMonitor(QObject):
         if t is not None and t.is_alive():
             # Capture can block briefly; join with a cap so UI never freezes long.
             t.join(timeout=4.0)
+            if t.is_alive():
+                # Do not clear the generation stop event; keep as zombie so
+                # start() refuses until it dies (never share a cleared Event).
+                self._zombie = t
 
-    def _sleep_interruptible(self, seconds: float) -> None:
+    def _sleep_interruptible(self, stop_ev: threading.Event, seconds: float) -> None:
         end = time.monotonic() + max(0.0, seconds)
-        while not self._stop.is_set() and time.monotonic() < end:
+        while not stop_ev.is_set() and time.monotonic() < end:
             time.sleep(min(0.05, end - time.monotonic()))
 
-    def _fire_if_cooldown(self, cooldown_s: float, wait_stable: bool) -> None:
+    def _fire_if_cooldown(
+        self, stop_ev: threading.Event, cooldown_s: float, wait_stable: bool
+    ) -> None:
         now = time.monotonic()
         with self._lock:
             if now - self._last_fire < cooldown_s:
@@ -106,24 +141,24 @@ class RegionMonitor(QObject):
                 self._pending_change = False
                 self._stable_since = None
         if in_cooldown:
-            self.status.emit("冷卻中，稍候再觸發…")
+            self.status.emit(tr("monitor.cooldown"))
             return
         if wait_stable:
-            self.status.emit("畫面已穩定，開始處理…")
+            self.status.emit(tr("monitor.stable_fire"))
         else:
-            self.status.emit("偵測到變化，開始處理…")
-        self.region_changed.emit()
+            self.status.emit(tr("monitor.change_fire"))
+        if not stop_ev.is_set():
+            self.region_changed.emit()
 
-    def _run_loop(self) -> None:
+    def _run_loop(self, stop_ev: threading.Event) -> None:
         with self._lock:
-            mode = (
-                f"穩定 {int(self._stable_s * 1000)}ms 後辨識"
-                if self._wait_stable
-                else "變化即辨識"
-            )
-        self.status.emit(f"監控中（{mode}）…")
+            if self._wait_stable:
+                mode = tr("monitor.mode_stable", ms=int(self._stable_s * 1000))
+            else:
+                mode = tr("monitor.mode_immediate")
+        self.status.emit(tr("monitor.running", mode=mode))
 
-        while not self._stop.is_set():
+        while not stop_ev.is_set():
             with self._lock:
                 cfg = deepcopy(self._cfg) if self._cfg is not None else None
                 if cfg is not None:
@@ -135,7 +170,7 @@ class RegionMonitor(QObject):
                 cooldown_s = self._cooldown_s
 
             if cfg is None or not cfg.has_region:
-                self._sleep_interruptible(0.3)
+                self._sleep_interruptible(stop_ev, 0.3)
                 continue
 
             try:
@@ -150,18 +185,18 @@ class RegionMonitor(QObject):
                     abs_w=int(getattr(cfg, "region_abs_w", 0) or 0),
                     abs_h=int(getattr(cfg, "region_abs_h", 0) or 0),
                 )
-                if self._stop.is_set():
+                if stop_ev.is_set():
                     break
                 gray = image_to_gray_array(img)
 
                 status_msg: str | None = None
                 should_fire = False
                 with self._lock:
-                    if self._stop.is_set():
+                    if stop_ev.is_set():
                         break
                     if self._last_gray is None:
                         self._last_gray = gray
-                        status_msg = "監控中：已建立基準畫面"
+                        status_msg = tr("monitor.baseline")
                     else:
                         diff = mean_abs_diff(self._last_gray, gray)
                         eff_threshold = max(float(threshold), 1e-6)
@@ -176,12 +211,12 @@ class RegionMonitor(QObject):
                                 self._last_gray = gray * 0.2 + self._last_gray * 0.8
                                 if now - self._idle_status_at > 8.0:
                                     self._idle_status_at = now
-                                    status_msg = "監控中（變化即辨識）…"
+                                    status_msg = tr("monitor.idle_immediate")
                         elif diff >= eff_threshold:
                             self._pending_change = True
                             self._stable_since = None
                             self._last_gray = gray
-                            status_msg = "偵測到變化，等待畫面穩定…"
+                            status_msg = tr("monitor.waiting_stable")
                         elif self._pending_change:
                             if diff <= quiet:
                                 if self._stable_since is None:
@@ -191,9 +226,11 @@ class RegionMonitor(QObject):
                                 pct = (
                                     min(100, int(100 * held / need)) if need > 0 else 100
                                 )
-                                status_msg = (
-                                    f"等待畫面穩定… {held * 1000:.0f}/{need * 1000:.0f} ms"
-                                    f"（{pct}%）"
+                                status_msg = tr(
+                                    "monitor.stable_progress",
+                                    held=f"{held * 1000:.0f}",
+                                    need=f"{need * 1000:.0f}",
+                                    pct=pct,
                                 )
                                 self._last_gray = gray
                                 if held >= need:
@@ -201,20 +238,21 @@ class RegionMonitor(QObject):
                             else:
                                 self._stable_since = None
                                 self._last_gray = gray
-                                status_msg = "畫面仍在變化，繼續等待穩定…"
+                                status_msg = tr("monitor.still_changing")
                         else:
                             self._last_gray = gray * 0.2 + self._last_gray * 0.8
                             if now - self._idle_status_at > 8.0:
                                 self._idle_status_at = now
-                                status_msg = (
-                                    f"監控中（穩定 {int(stable_s * 1000)}ms 後辨識）…"
+                                status_msg = tr(
+                                    "monitor.idle_stable",
+                                    ms=int(stable_s * 1000),
                                 )
 
                 if status_msg is not None:
                     self.status.emit(status_msg)
-                if should_fire and not self._stop.is_set():
-                    self._fire_if_cooldown(cooldown_s, wait_stable)
+                if should_fire and not stop_ev.is_set():
+                    self._fire_if_cooldown(stop_ev, cooldown_s, wait_stable)
             except Exception as exc:
-                if not self._stop.is_set():
+                if not stop_ev.is_set():
                     self.error.emit(str(exc))
-            self._sleep_interruptible(interval_s)
+            self._sleep_interruptible(stop_ev, interval_s)

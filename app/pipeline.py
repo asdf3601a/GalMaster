@@ -18,6 +18,7 @@ from app.capture.screenshot import (
     make_preview_image,
 )
 from app.config import AppConfig
+from app.i18n import tr
 from app.ocr.base import OCREngine, create_ocr_engine
 from app.translate.cache import TranslationCache
 from app.translate.llm_translator import (
@@ -73,7 +74,9 @@ class _Worker(QObject):
             img = job.image
             force = job.force
         else:
-            self.finished.emit(PipelineResult("", "", error="內部錯誤：無效的工作項目"))
+            self.finished.emit(
+                PipelineResult("", "", error=tr("pipe.invalid_job"))
+            )
             return
 
         # Honour abort set before this job started (e.g. shutdown).
@@ -81,7 +84,9 @@ class _Worker(QObject):
         # next intentional job is not skipped after a prior cancel.
         if self._abort:
             self.finished.emit(
-                PipelineResult("", "", skipped=True, status_message="已取消")
+                PipelineResult(
+                    "", "", skipped=True, status_message=tr("pipe.cancelled")
+                )
             )
             return
         self.clear_abort()
@@ -89,9 +94,11 @@ class _Worker(QObject):
         try:
             if img is None:
                 if not cfg.has_region and not getattr(cfg, "has_abs_region", False):
-                    self.finished.emit(PipelineResult("", "", error="尚未框選 OCR 區域"))
+                    self.finished.emit(
+                        PipelineResult("", "", error=tr("pipe.no_region"))
+                    )
                     return
-                self.progress.emit("截圖中…")
+                self.progress.emit(tr("pipe.capturing"))
                 img = capture_region(
                     hwnd=cfg.bound_hwnd or None,
                     rel_x=cfg.region_x,
@@ -106,11 +113,13 @@ class _Worker(QObject):
 
             if self._abort:
                 self.finished.emit(
-                    PipelineResult("", "", skipped=True, status_message="已取消")
+                    PipelineResult(
+                        "", "", skipped=True, status_message=tr("pipe.cancelled")
+                    )
                 )
                 return
 
-            self.progress.emit(f"準備影像…（{describe_image(img)}）")
+            self.progress.emit(tr("pipe.prep_image", info=describe_image(img)))
             try:
                 self.preview_ready.emit(make_preview_image(img))
             except Exception:
@@ -121,11 +130,7 @@ class _Worker(QObject):
                     PipelineResult(
                         "",
                         "",
-                        error=(
-                            "截圖幾乎空白/全黑（可能被 Overlay 擋住、視窗內容未繪出、"
-                            f"或框選區域不對）。{describe_image(img)}\n"
-                            "請查看主視窗擷取預覽確認是否看得到文字。"
-                        ),
+                        error=tr("pipe.blank", info=describe_image(img)),
                     )
                 )
                 return
@@ -136,16 +141,20 @@ class _Worker(QObject):
             else:
                 self._run_ocr(cfg, img, force=force)
         except Exception as exc:
-            self.finished.emit(PipelineResult("", "", error=f"管線錯誤：{exc}"))
+            self.finished.emit(
+                PipelineResult("", "", error=tr("pipe.error", err=str(exc)))
+            )
 
     def _run_ocr(self, cfg: AppConfig, img: Image.Image, *, force: bool) -> None:
         ocr = self._get_ocr(cfg.ocr_engine, getattr(cfg, "source_lang", "ja") or "ja")
         backend = getattr(ocr, "backend_label", None) or cfg.ocr_engine
-        self.progress.emit(f"OCR 辨識中（{backend}）…")
+        self.progress.emit(tr("pipe.ocr_running", backend=backend))
         source = ocr.recognize(img).strip()
         if self._abort:
             self.finished.emit(
-                PipelineResult("", "", skipped=True, status_message="已取消")
+                PipelineResult(
+                    "", "", skipped=True, status_message=tr("pipe.cancelled")
+                )
             )
             return
         if not source:
@@ -153,11 +162,7 @@ class _Worker(QObject):
                 PipelineResult(
                     "",
                     "",
-                    error=(
-                        "OCR 未辨識到文字。"
-                        f"截圖 {describe_image(img)}\n"
-                        "請查看主視窗擷取預覽；日文可試 OneOCR 或 Manga OCR，並重新框選對話框。"
-                    ),
+                    error=tr("pipe.ocr_empty", info=describe_image(img)),
                 )
             )
             return
@@ -169,7 +174,7 @@ class _Worker(QObject):
                     source,
                     "",
                     skipped=True,
-                    status_message="文字未變化（已略過翻譯）",
+                    status_message=tr("pipe.unchanged"),
                 )
             )
             return
@@ -179,7 +184,7 @@ class _Worker(QObject):
         history = list(self._history)[-hist_n:] if hist_n > 0 else []
 
         if not cfg.has_llm:
-            self.progress.emit("OCR 完成（未設定 LLM）")
+            self.progress.emit(tr("pipe.ocr_done_no_llm"))
             self._push_history(source, "")
             self.finished.emit(PipelineResult(source, "", ocr_only=True))
             return
@@ -195,21 +200,23 @@ class _Worker(QObject):
         )
         cached = self._cache.get(cache_key)
         if cached is not None:
-            self.progress.emit("使用翻譯快取…")
+            self.progress.emit(tr("pipe.cache"))
             self._push_history(source, cached)
             self.finished.emit(PipelineResult(source, cached, from_cache=True))
             return
 
         if self._abort:
             self.finished.emit(
-                PipelineResult("", "", skipped=True, status_message="已取消")
+                PipelineResult(
+                    "", "", skipped=True, status_message=tr("pipe.cancelled")
+                )
             )
             return
 
         self.progress.emit(
-            f"LLM 翻譯中…（上下文 {len(history)}/{hist_n} 則）"
+            tr("pipe.llm_ctx", n=len(history), total=hist_n)
             if hist_n
-            else "LLM 翻譯中…"
+            else tr("pipe.llm")
         )
         translator = self._make_translator(cfg)
         translated = translator.translate(
@@ -220,17 +227,13 @@ class _Worker(QObject):
         )
         self._cache.put(cache_key, translated)
         self._push_history(source, translated)
-        self.progress.emit("翻譯完成")
+        self.progress.emit(tr("pipe.translate_done"))
         self.finished.emit(PipelineResult(source, translated, from_cache=False))
 
     def _run_vlm(self, cfg: AppConfig, img: Image.Image, *, force: bool) -> None:
         if not cfg.has_llm:
             self.finished.emit(
-                PipelineResult(
-                    "",
-                    "",
-                    error="VLM 模式需要 API Key（將截圖直接送給多模態 LLM）。",
-                )
+                PipelineResult("", "", error=tr("pipe.vlm_need_key"))
             )
             return
 
@@ -241,7 +244,7 @@ class _Worker(QObject):
                     "",
                     "",
                     skipped=True,
-                    status_message="畫面未變化（已略過 VLM）",
+                    status_message=tr("pipe.vlm_unchanged"),
                 )
             )
             return
@@ -264,7 +267,7 @@ class _Worker(QObject):
                 src_c, tr_c = cached.split("\x1e", 1)
             else:
                 src_c, tr_c = "", cached
-            self.progress.emit("使用翻譯快取…")
+            self.progress.emit(tr("pipe.cache"))
             self._last_image_fp = img_fp
             self._push_history(src_c or "(VLM)", tr_c)
             self.finished.emit(PipelineResult(src_c, tr_c, from_cache=True))
@@ -272,14 +275,16 @@ class _Worker(QObject):
 
         if self._abort:
             self.finished.emit(
-                PipelineResult("", "", skipped=True, status_message="已取消")
+                PipelineResult(
+                    "", "", skipped=True, status_message=tr("pipe.cancelled")
+                )
             )
             return
 
         self.progress.emit(
-            f"VLM 翻譯中…（上下文 {len(history)}/{hist_n} 則）"
+            tr("pipe.vlm_ctx", n=len(history), total=hist_n)
             if hist_n
-            else "VLM 翻譯中…"
+            else tr("pipe.vlm")
         )
         translator = self._make_translator(cfg)
         source, translated = translator.translate_image(
@@ -290,7 +295,7 @@ class _Worker(QObject):
         )
         if not (translated or "").strip() and not (source or "").strip():
             self.finished.emit(
-                PipelineResult("", "", error="VLM 未回傳可用文字，請確認模型支援影像輸入。")
+                PipelineResult("", "", error=tr("pipe.vlm_empty"))
             )
             return
         if not (translated or "").strip() and (source or "").strip():
@@ -300,7 +305,7 @@ class _Worker(QObject):
         self._cache.put(cache_key, f"{source}\x1e{translated}")
         self._last_image_fp = img_fp
         self._push_history(source, translated)
-        self.progress.emit("翻譯完成")
+        self.progress.emit(tr("pipe.translate_done"))
         self.finished.emit(PipelineResult(source, translated, from_cache=False))
 
     @staticmethod
@@ -374,12 +379,12 @@ class _Worker(QObject):
     def _get_ocr(self, kind: str, lang: str = "ja") -> OCREngine:
         key = f"{kind}:{lang}"
         if self._ocr is None or self._ocr_kind != key:
-            self.progress.emit(f"載入 OCR 引擎（{kind}）…")
+            self.progress.emit(tr("pipe.ocr_load", kind=kind))
             self._ocr = create_ocr_engine(kind, lang=lang)
             self._ocr_kind = key
             label = getattr(self._ocr, "backend_label", None)
             if label:
-                self.progress.emit(f"OCR 引擎就緒：{label}")
+                self.progress.emit(tr("pipe.ocr_ready", label=label))
         return self._ocr
 
     def reset_dedupe(self) -> None:

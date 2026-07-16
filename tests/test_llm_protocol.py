@@ -3,6 +3,7 @@ from app.translate.llm_translator import (
     build_sampling_payload,
     build_system_prompt,
     build_user_prompt,
+    build_vlm_history_messages,
     parse_vlm_response,
     sampling_fingerprint,
     _extract_model_ids,
@@ -51,6 +52,19 @@ def test_chat_messages_sliding_window():
     assert msgs[1]["content"] == "早安"
     assert msgs[-1]["role"] == "user"
     assert "うん" in msgs[-1]["content"]
+
+
+def test_vlm_history_uses_source_translation_shape():
+    history = [("おはよう", "早安")]
+    msgs = build_vlm_history_messages(history)
+    assert len(msgs) == 2
+    assert msgs[0]["role"] == "user"
+    assert "SOURCE:" in msgs[0]["content"]
+    assert "TRANSLATION:" in msgs[0]["content"]
+    assert "Translate the following" not in msgs[0]["content"]
+    assert msgs[1]["role"] == "assistant"
+    assert "おはよう" in msgs[1]["content"]
+    assert "早安" in msgs[1]["content"]
 
 
 def test_chat_messages_no_history():
