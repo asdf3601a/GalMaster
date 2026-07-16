@@ -174,6 +174,16 @@ class RegionMonitor(QObject):
                 continue
 
             try:
+                # Change detection uses cheap GDI/bitblt path — full WGC is reserved
+                # for the OCR job (capture_from_config / pipeline) to avoid lag + lock
+                # contention on every poll interval.
+                mon_method = str(
+                    getattr(cfg, "window_capture_method", "auto") or "auto"
+                ).strip().lower()
+                if mon_method == "wgc":
+                    mon_method = "wgc"  # user forced WGC for everything
+                else:
+                    mon_method = "bitblt"
                 img = capture_region(
                     hwnd=cfg.bound_hwnd or None,
                     rel_x=cfg.region_x,
@@ -184,6 +194,7 @@ class RegionMonitor(QObject):
                     abs_y=int(getattr(cfg, "region_abs_y", 0) or 0),
                     abs_w=int(getattr(cfg, "region_abs_w", 0) or 0),
                     abs_h=int(getattr(cfg, "region_abs_h", 0) or 0),
+                    method=mon_method,
                 )
                 if stop_ev.is_set():
                     break

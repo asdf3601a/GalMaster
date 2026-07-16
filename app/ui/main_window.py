@@ -97,8 +97,8 @@ class MainWindow(QMainWindow):
         self._obs_status_url = ""
         self._obs_status_err = ""
 
-        # form-row label widgets kept for retranslate
-        self._form_labels: dict[str, QLabel] = {}
+        # form-row labels for retranslate: i18n_key -> one or more QLabel (no key collisions)
+        self._form_labels: dict[str, list[QLabel]] = {}
 
         central = QWidget()
         outer = QVBoxLayout(central)
@@ -199,9 +199,14 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------ builders
 
     def _add_form_label(self, form: QFormLayout, key: str, field: QWidget) -> None:
+        """Add a form row; *key* is an i18n id. Multiple rows may share the same key."""
         lab = QLabel()
-        self._form_labels[key] = lab
+        self._form_labels.setdefault(key, []).append(lab)
         form.addRow(lab, field)
+
+    def _expand_field(self, w: QWidget) -> None:
+        w.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        w.setMinimumWidth(0)
 
     def _build_capture_group(self, cfg: AppConfig) -> QGroupBox:
         self.cap_group = QGroupBox()
@@ -236,10 +241,14 @@ class MainWindow(QMainWindow):
         self._update_region_label()
         cap_l.addWidget(self.region_label)
 
-        mode_row = QHBoxLayout()
-        self.lbl_pipeline_mode = QLabel()
+        # Pipeline + OCR + window capture method (same form — VLM disables OCR nearby)
+        pipe = QFormLayout()
+        pipe.setSpacing(6)
+        pipe.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
+
         self.pipeline_mode_combo = NoWheelComboBox()
         self.pipeline_mode_combo.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self._expand_field(self.pipeline_mode_combo)
         self.pipeline_mode_combo.addItem("", "ocr")
         self.pipeline_mode_combo.addItem("", "vlm")
         self._set_combo(
@@ -248,21 +257,46 @@ class MainWindow(QMainWindow):
         )
         self.pipeline_mode_combo.currentIndexChanged.connect(self._mark_dirty)
         self.pipeline_mode_combo.currentIndexChanged.connect(self._on_pipeline_mode_changed)
-        mode_row.addWidget(self.lbl_pipeline_mode)
-        mode_row.addWidget(self.pipeline_mode_combo, 1)
-        cap_l.addLayout(mode_row)
+        self._add_form_label(pipe, "label.pipeline_mode", self.pipeline_mode_combo)
 
+        self.ocr_combo = NoWheelComboBox()
+        self.ocr_combo.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self._expand_field(self.ocr_combo)
+        for code in ("oneocr", "manga", "rapid", "paddle"):
+            self.ocr_combo.addItem(code, code)
+        self._set_combo(
+            self.ocr_combo, normalize_ocr_engine(cfg.ocr_engine or DEFAULT_OCR_ENGINE)
+        )
+        self.ocr_combo.currentIndexChanged.connect(self._mark_dirty)
+        self._add_form_label(pipe, "label.ocr", self.ocr_combo)
+
+        self.capture_method_combo = NoWheelComboBox()
+        self.capture_method_combo.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self._expand_field(self.capture_method_combo)
+        for code in ("auto", "wgc", "bitblt"):
+            self.capture_method_combo.addItem(code, code)
+        self._set_combo(
+            self.capture_method_combo,
+            str(getattr(cfg, "window_capture_method", "auto") or "auto"),
+        )
+        self.capture_method_combo.currentIndexChanged.connect(self._mark_dirty)
+        self._add_form_label(pipe, "label.capture_method", self.capture_method_combo)
+        cap_l.addLayout(pipe)
+
+        # Auto-monitor timing (used immediately on Start; also Apply/Save)
         mon = QFormLayout()
         mon.setSpacing(6)
         mon.setLabelAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
         mon.setFormAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
-        mon.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.FieldsStayAtSizeHint)
+        mon.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
 
         self.stable_ms_spin = NoWheelSpinBox()
         self.stable_ms_spin.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.stable_ms_spin.setRange(0, 10000)
         self.stable_ms_spin.setSingleStep(100)
         self.stable_ms_spin.setSuffix(" ms")
+        self.stable_ms_spin.setAlignment(Qt.AlignmentFlag.AlignLeft)
+        self._expand_field(self.stable_ms_spin)
         stable_ms = int(getattr(cfg, "monitor_stable_ms", 800) or 0)
         if not getattr(cfg, "monitor_wait_stable", True):
             stable_ms = 0
@@ -275,6 +309,8 @@ class MainWindow(QMainWindow):
         self.interval_spin.setRange(0, 5000)
         self.interval_spin.setSingleStep(50)
         self.interval_spin.setSuffix(" ms")
+        self.interval_spin.setAlignment(Qt.AlignmentFlag.AlignLeft)
+        self._expand_field(self.interval_spin)
         self.interval_spin.setValue(int(cfg.monitor_interval_ms or 0))
         self.interval_spin.valueChanged.connect(self._mark_dirty)
         self._add_form_label(mon, "label.interval", self.interval_spin)
@@ -284,18 +320,45 @@ class MainWindow(QMainWindow):
         self.cooldown_spin.setRange(0, 30000)
         self.cooldown_spin.setSingleStep(100)
         self.cooldown_spin.setSuffix(" ms")
+        self.cooldown_spin.setAlignment(Qt.AlignmentFlag.AlignLeft)
+        self._expand_field(self.cooldown_spin)
         self.cooldown_spin.setValue(int(getattr(cfg, "monitor_cooldown_ms", 1200) or 0))
         self.cooldown_spin.valueChanged.connect(self._mark_dirty)
         self._add_form_label(mon, "label.cooldown", self.cooldown_spin)
+
+        self.buffer_spin = NoWheelSpinBox()
+        self.buffer_spin.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.buffer_spin.setRange(1, 16)
+        self.buffer_spin.setSingleStep(1)
+        self.buffer_spin.setAlignment(Qt.AlignmentFlag.AlignLeft)
+        self._expand_field(self.buffer_spin)
+        try:
+            from app.config import clamp_pipeline_buffer_size
+
+            buf_n = clamp_pipeline_buffer_size(
+                getattr(cfg, "pipeline_buffer_size", 3)
+            )
+        except Exception:
+            buf_n = 3
+        self.buffer_spin.setValue(buf_n)
+        self.buffer_spin.valueChanged.connect(self._mark_dirty)
+        self._add_form_label(mon, "label.pipeline_buffer", self.buffer_spin)
 
         self.threshold_spin = NoWheelDoubleSpinBox()
         self.threshold_spin.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.threshold_spin.setRange(0.0, 0.5)
         self.threshold_spin.setSingleStep(0.005)
         self.threshold_spin.setDecimals(3)
+        self.threshold_spin.setAlignment(Qt.AlignmentFlag.AlignLeft)
+        self._expand_field(self.threshold_spin)
         self.threshold_spin.setValue(float(cfg.monitor_diff_threshold))
         self.threshold_spin.valueChanged.connect(self._mark_dirty)
         self._add_form_label(mon, "label.threshold", self.threshold_spin)
+
+        self.monitor_hint = QLabel()
+        self.monitor_hint.setObjectName("hint")
+        self.monitor_hint.setWordWrap(True)
+        mon.addRow(self.monitor_hint)
 
         cap_l.addLayout(mon)
 
@@ -358,6 +421,7 @@ class MainWindow(QMainWindow):
         chk = QCheckBox()
         spin = NoWheelDoubleSpinBox()
         spin.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        spin.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         spin.setRange(minimum, maximum)
         spin.setSingleStep(step)
         spin.setDecimals(decimals)
@@ -387,6 +451,7 @@ class MainWindow(QMainWindow):
         chk = QCheckBox()
         spin = NoWheelSpinBox()
         spin.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        spin.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         spin.setRange(minimum, maximum)
         spin.setSingleStep(step)
         spin.setValue(default)
@@ -399,11 +464,40 @@ class MainWindow(QMainWindow):
         row.addWidget(spin, 1)
         return chk, spin, wrap
 
+    def _make_optional_combo(
+        self,
+        *,
+        items: list[tuple[str, str]],
+        current: str,
+        enabled: bool,
+    ) -> tuple[QCheckBox, NoWheelComboBox, QWidget]:
+        """Checkbox + combo row, matching optional temperature/top_p style."""
+        wrap = QWidget()
+        row = QHBoxLayout(wrap)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(6)
+        chk = QCheckBox()
+        combo = NoWheelComboBox()
+        combo.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        combo.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        for text, data in items:
+            combo.addItem(text, data)
+        self._set_combo(combo, current)
+        combo.setEnabled(enabled)
+        chk.setChecked(enabled)
+        chk.toggled.connect(combo.setEnabled)
+        chk.toggled.connect(self._mark_dirty)
+        combo.currentIndexChanged.connect(self._mark_dirty)
+        row.addWidget(chk)
+        row.addWidget(combo, 1)
+        return chk, combo, wrap
+
     def _build_llm_group(self, cfg: AppConfig) -> QGroupBox:
         self.llm_group = QGroupBox()
         form = QFormLayout(self.llm_group)
         form.setSpacing(6)
         form.setContentsMargins(8, 10, 8, 8)
+        form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
 
         self.llm_optional_hint = QLabel()
         self.llm_optional_hint.setObjectName("hint")
@@ -473,6 +567,7 @@ class MainWindow(QMainWindow):
         self.context_spin = NoWheelSpinBox()
         self.context_spin.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.context_spin.setRange(0, 20)
+        self._expand_field(self.context_spin)
         self.context_spin.setValue(int(getattr(cfg, "context_history_size", 3) or 0))
         self.context_spin.valueChanged.connect(self._mark_dirty)
         self._add_form_label(form, "label.context", self.context_spin)
@@ -481,6 +576,7 @@ class MainWindow(QMainWindow):
         self.max_tokens_spin.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.max_tokens_spin.setRange(64, 128000)
         self.max_tokens_spin.setSingleStep(256)
+        self._expand_field(self.max_tokens_spin)
         self.max_tokens_spin.setValue(int(getattr(cfg, "max_tokens", 2048) or 2048))
         self.max_tokens_spin.valueChanged.connect(self._mark_dirty)
         self._add_form_label(form, "label.max_tokens", self.max_tokens_spin)
@@ -555,14 +651,20 @@ class MainWindow(QMainWindow):
         )
         self._add_form_label(adv, "label.seed", seed_w)
 
-        self.reasoning_combo = NoWheelComboBox()
-        self.reasoning_combo.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
-        for code in ("", "none", "low", "medium", "high"):
-            self.reasoning_combo.addItem(code or "(omit)", code)
-        effort = (getattr(cfg, "reasoning_effort", "") or "").strip().lower()
-        self._set_combo(self.reasoning_combo, effort)
-        self.reasoning_combo.currentIndexChanged.connect(self._mark_dirty)
-        self._add_form_label(adv, "label.reasoning", self.reasoning_combo)
+        raw_effort = (getattr(cfg, "reasoning_effort", "") or "").strip().lower()
+        effort_enabled = raw_effort in ("none", "low", "medium", "high")
+        # Match optional sampling rows: ☑ + expanding field (omit when unchecked)
+        self.reasoning_chk, self.reasoning_combo, reasoning_w = self._make_optional_combo(
+            items=[
+                ("none", "none"),
+                ("low", "low"),
+                ("medium", "medium"),
+                ("high", "high"),
+            ],
+            current=raw_effort if effort_enabled else "none",
+            enabled=effort_enabled,
+        )
+        self._add_form_label(adv, "label.reasoning", reasoning_w)
 
         self.sampling_hint = QLabel()
         self.sampling_hint.setObjectName("hint")
@@ -578,6 +680,7 @@ class MainWindow(QMainWindow):
         self.display_group = QGroupBox()
         form = QFormLayout(self.display_group)
         form.setSpacing(6)
+        form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
 
         self.ui_lang_combo = NoWheelComboBox()
         self.ui_lang_combo.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
@@ -588,42 +691,26 @@ class MainWindow(QMainWindow):
         self._add_form_label(form, "label.ui_language", self.ui_lang_combo)
 
         self.hotkey_edit = QLineEdit(cfg.hotkey)
+        self._expand_field(self.hotkey_edit)
         self.hotkey_edit.textChanged.connect(self._mark_dirty)
-
-        self.ocr_combo = NoWheelComboBox()
-        self.ocr_combo.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
-        for code in ("oneocr", "manga", "rapid", "paddle"):
-            self.ocr_combo.addItem(code, code)
-        self._set_combo(
-            self.ocr_combo, normalize_ocr_engine(cfg.ocr_engine or DEFAULT_OCR_ENGINE)
-        )
-        self.ocr_combo.currentIndexChanged.connect(self._mark_dirty)
-
-        row_hot = QHBoxLayout()
-        row_hot.addWidget(self.hotkey_edit, 1)
-        self.lbl_ocr_inline = QLabel()
-        row_hot.addWidget(self.lbl_ocr_inline)
-        row_hot.addWidget(self.ocr_combo)
-        hot_wrap = QWidget()
-        hot_wrap.setLayout(row_hot)
-        self._add_form_label(form, "label.hotkey", hot_wrap)
+        self._add_form_label(form, "label.hotkey", self.hotkey_edit)
 
         self.ov_hint = QLabel()
         self.ov_hint.setObjectName("hint")
         self.ov_hint.setWordWrap(True)
         form.addRow(self.ov_hint)
 
-        # Content visibility
+        # Content visibility (keep at least one checked)
         self.ov_show_source_check = QCheckBox()
         self.ov_show_source_check.setChecked(
             bool(getattr(cfg, "overlay_show_source", True))
         )
-        self.ov_show_source_check.toggled.connect(self._mark_dirty)
+        self.ov_show_source_check.toggled.connect(self._on_ov_show_toggled)
         self.ov_show_translation_check = QCheckBox()
         self.ov_show_translation_check.setChecked(
             bool(getattr(cfg, "overlay_show_translation", True))
         )
-        self.ov_show_translation_check.toggled.connect(self._mark_dirty)
+        self.ov_show_translation_check.toggled.connect(self._on_ov_show_toggled)
         row_show = QHBoxLayout()
         row_show.addWidget(self.ov_show_source_check)
         row_show.addWidget(self.ov_show_translation_check)
@@ -673,15 +760,10 @@ class MainWindow(QMainWindow):
         )
         self.ov_tr_font_spin.valueChanged.connect(self._mark_dirty)
 
-        row_ov = QHBoxLayout()
-        self.lbl_opacity = QLabel()
-        row_ov.addWidget(self.lbl_opacity)
-        row_ov.addWidget(self.opacity_spin)
-        row_ov.addStretch(1)
-        ov_wrap = QWidget()
-        ov_wrap.setLayout(row_ov)
-        self._add_form_label(form, "label.overlay_look", ov_wrap)
+        self._expand_field(self.opacity_spin)
+        self._add_form_label(form, "label.opacity", self.opacity_spin)
 
+        self._expand_field(self.ov_font_combo)
         self._add_form_label(form, "label.font_family", self.ov_font_combo)
 
         row_sz = QHBoxLayout()
@@ -779,6 +861,7 @@ class MainWindow(QMainWindow):
         self.obs_group = QGroupBox()
         form = QFormLayout(self.obs_group)
         form.setSpacing(6)
+        form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
 
         self.obs_hint = QLabel()
         self.obs_hint.setObjectName("hint")
@@ -799,12 +882,12 @@ class MainWindow(QMainWindow):
 
         self.obs_show_source_check = QCheckBox()
         self.obs_show_source_check.setChecked(bool(getattr(cfg, "obs_show_source", False)))
-        self.obs_show_source_check.toggled.connect(self._mark_dirty)
+        self.obs_show_source_check.toggled.connect(self._on_obs_show_toggled)
         self.obs_show_translation_check = QCheckBox()
         self.obs_show_translation_check.setChecked(
             bool(getattr(cfg, "obs_show_translation", True))
         )
-        self.obs_show_translation_check.toggled.connect(self._mark_dirty)
+        self.obs_show_translation_check.toggled.connect(self._on_obs_show_toggled)
         row_obs_show = QHBoxLayout()
         row_obs_show.addWidget(self.obs_show_source_check)
         row_obs_show.addWidget(self.obs_show_translation_check)
@@ -943,7 +1026,12 @@ class MainWindow(QMainWindow):
 
     def _update_obs_url_label(self, *_args) -> None:
         port = int(self.obs_port_spin.value())
-        self.obs_url_label.setText(f"http://127.0.0.1:{port}/")
+        applied = int(getattr(self._cfg, "obs_port", port) or port)
+        url = f"http://127.0.0.1:{port}/"
+        if port != applied:
+            self.obs_url_label.setText(tr("obs.url_draft", url=url))
+        else:
+            self.obs_url_label.setText(url)
 
     def _build_result_group(self) -> QGroupBox:
         self.result_group = QGroupBox()
@@ -1026,7 +1114,6 @@ class MainWindow(QMainWindow):
         self.btn_refresh_models.setText(tr("btn.refresh_models"))
         self.btn_refresh_models.setToolTip(tr("tip.refresh_models"))
 
-        self.lbl_pipeline_mode.setText(tr("label.pipeline_mode"))
         self.pipeline_mode_combo.setItemText(0, tr("mode.ocr"))
         self.pipeline_mode_combo.setItemText(1, tr("mode.vlm"))
         self.pipeline_mode_combo.setToolTip(tr("tip.pipeline_mode"))
@@ -1043,8 +1130,6 @@ class MainWindow(QMainWindow):
         self.sampling_hint.setText(tr("tip.sampling"))
 
         self.ov_hint.setText(tr("hint.overlay"))
-        self.lbl_ocr_inline.setText(tr("label.ocr"))
-        self.lbl_opacity.setText(tr("label.opacity"))
         self.ov_show_source_check.setText(tr("label.show_source"))
         self.ov_show_translation_check.setText(tr("label.show_translation"))
         self.lbl_ov_src_font.setText(tr("label.source_font"))
@@ -1061,6 +1146,10 @@ class MainWindow(QMainWindow):
         self.ocr_combo.setToolTip(tr("tip.ocr"))
         for i, code in enumerate(("oneocr", "manga", "rapid", "paddle")):
             self.ocr_combo.setItemText(i, tr(f"ocr.{code}"))
+        for i, code in enumerate(("auto", "wgc", "bitblt")):
+            self.capture_method_combo.setItemText(i, tr(f"capture.{code}"))
+        self.capture_method_combo.setToolTip(tr("tip.capture_method"))
+        self.monitor_hint.setText(tr("hint.monitor_fields"))
 
         self.obs_hint.setText(tr("hint.obs"))
         self.obs_enabled_check.setText(tr("label.obs_enabled"))
@@ -1079,14 +1168,16 @@ class MainWindow(QMainWindow):
         self.stable_ms_spin.setToolTip(tr("tip.stable_ms"))
         self.interval_spin.setToolTip(tr("tip.interval"))
         self.cooldown_spin.setToolTip(tr("tip.cooldown"))
+        self.buffer_spin.setToolTip(tr("tip.pipeline_buffer"))
         self.threshold_spin.setToolTip(tr("tip.threshold"))
 
-        for key, lab in self._form_labels.items():
-            lab.setText(tr(key))
+        for key, labs in self._form_labels.items():
+            text = tr(key)
+            for lab in labs:
+                lab.setText(text)
 
-        # reasoning combo labels
+        # reasoning combo labels (omit handled by checkbox, same as other sampling)
         mapping = {
-            "": "reasoning.unset",
             "none": "reasoning.none",
             "low": "reasoning.low",
             "medium": "reasoning.medium",
@@ -1094,11 +1185,14 @@ class MainWindow(QMainWindow):
         }
         for i in range(self.reasoning_combo.count()):
             code = self.reasoning_combo.itemData(i)
-            self.reasoning_combo.setItemText(i, tr(mapping.get(code or "", "reasoning.unset")))
+            self.reasoning_combo.setItemText(
+                i, tr(mapping.get(code or "", "reasoning.none"))
+            )
 
         self.set_overlay_button_state(self._overlay_visible)
         self._refresh_obs_status_label()
         self._update_region_label()
+        self._update_obs_url_label()
         # keep window none item if present
         if self.window_combo.count() > 0 and self.window_combo.itemData(0) == 0:
             self.window_combo.setItemText(0, tr("window.none"))
@@ -1203,6 +1297,10 @@ class MainWindow(QMainWindow):
                 (getattr(cfg, "pipeline_mode", "ocr") or "ocr"),
             )
             self._set_combo(
+                self.capture_method_combo,
+                str(getattr(cfg, "window_capture_method", "auto") or "auto"),
+            )
+            self._set_combo(
                 self.ui_lang_combo,
                 getattr(cfg, "ui_language", "zh-Hant") or "zh-Hant",
             )
@@ -1213,6 +1311,13 @@ class MainWindow(QMainWindow):
             self.interval_spin.setValue(int(cfg.monitor_interval_ms or 0))
             self.cooldown_spin.setValue(int(getattr(cfg, "monitor_cooldown_ms", 1200) or 0))
             self.threshold_spin.setValue(float(cfg.monitor_diff_threshold))
+            from app.config import clamp_pipeline_buffer_size
+
+            self.buffer_spin.setValue(
+                clamp_pipeline_buffer_size(
+                    getattr(cfg, "pipeline_buffer_size", 3)
+                )
+            )
 
             # optional sampling
             def _load_opt_float(chk, spin, val, default):
@@ -1269,7 +1374,14 @@ class MainWindow(QMainWindow):
                 self.seed_spin.setEnabled(False)
                 self.seed_spin.setValue(0)
             effort = (getattr(cfg, "reasoning_effort", "") or "").strip().lower()
-            self._set_combo(self.reasoning_combo, effort)
+            if effort in ("none", "low", "medium", "high"):
+                self.reasoning_chk.setChecked(True)
+                self.reasoning_combo.setEnabled(True)
+                self._set_combo(self.reasoning_combo, effort)
+            else:
+                self.reasoning_chk.setChecked(False)
+                self.reasoning_combo.setEnabled(False)
+                self._set_combo(self.reasoning_combo, "none")
 
             self.obs_enabled_check.setChecked(bool(getattr(cfg, "obs_enabled", False)))
             self.obs_port_spin.setValue(int(getattr(cfg, "obs_port", 8765) or 8765))
@@ -1362,6 +1474,7 @@ class MainWindow(QMainWindow):
             self.ocr_combo.currentData() or DEFAULT_OCR_ENGINE
         )
         c.pipeline_mode = self.pipeline_mode_combo.currentData() or "ocr"
+        c.window_capture_method = self.capture_method_combo.currentData() or "auto"
         c.ui_language = self.ui_lang_combo.currentData() or "zh-Hant"
         c.auto_monitor = bool(self._monitor_running)
         c.monitor_stable_ms = int(self.stable_ms_spin.value())
@@ -1369,6 +1482,9 @@ class MainWindow(QMainWindow):
         c.monitor_interval_ms = int(self.interval_spin.value())
         c.monitor_cooldown_ms = int(self.cooldown_spin.value())
         c.monitor_diff_threshold = float(self.threshold_spin.value())
+        from app.config import clamp_pipeline_buffer_size
+
+        c.pipeline_buffer_size = clamp_pipeline_buffer_size(self.buffer_spin.value())
 
         c.temperature = _optional_float_row(enabled=self.temp_chk.isChecked(), spin=self.temp_spin)
         c.top_p = _optional_float_row(enabled=self.topp_chk.isChecked(), spin=self.topp_spin)
@@ -1384,7 +1500,10 @@ class MainWindow(QMainWindow):
             enabled=self.pp_chk.isChecked(), spin=self.pp_spin
         )
         c.seed = _optional_int_row(enabled=self.seed_chk.isChecked(), spin=self.seed_spin)
-        c.reasoning_effort = (self.reasoning_combo.currentData() or "") or ""
+        if self.reasoning_chk.isChecked():
+            c.reasoning_effort = str(self.reasoning_combo.currentData() or "none")
+        else:
+            c.reasoning_effort = ""
 
         c.obs_enabled = self.obs_enabled_check.isChecked()
         c.obs_port = int(self.obs_port_spin.value())
@@ -1560,8 +1679,63 @@ class MainWindow(QMainWindow):
         self._update_region_label()
 
     def mark_runtime_dirty(self) -> None:
-        """Mark form dirty after operational changes that should be Saved (e.g. monitor)."""
-        self._set_dirty(True)
+        """Legacy: operational actions now persist immediately; keep for call-site compat."""
+        pass
+
+    def sync_operational_monitor(self, cfg: AppConfig) -> None:
+        """Update applied snapshot + form monitor fields without marking draft dirty."""
+        self._cfg.auto_monitor = bool(cfg.auto_monitor)
+        self._cfg.monitor_stable_ms = int(cfg.monitor_stable_ms)
+        self._cfg.monitor_wait_stable = bool(cfg.monitor_wait_stable)
+        self._cfg.monitor_interval_ms = int(cfg.monitor_interval_ms)
+        self._cfg.monitor_cooldown_ms = int(cfg.monitor_cooldown_ms)
+        self._cfg.monitor_diff_threshold = float(cfg.monitor_diff_threshold)
+        from app.config import clamp_pipeline_buffer_size
+
+        self._cfg.pipeline_buffer_size = clamp_pipeline_buffer_size(
+            getattr(cfg, "pipeline_buffer_size", 3)
+        )
+        self._cfg.window_capture_method = str(
+            getattr(cfg, "window_capture_method", "auto") or "auto"
+        )
+        self._loading_ui = True
+        try:
+            self.stable_ms_spin.setValue(max(0, int(cfg.monitor_stable_ms)))
+            self.interval_spin.setValue(int(cfg.monitor_interval_ms or 0))
+            self.cooldown_spin.setValue(int(cfg.monitor_cooldown_ms or 0))
+            self.threshold_spin.setValue(float(cfg.monitor_diff_threshold))
+            self.buffer_spin.setValue(self._cfg.pipeline_buffer_size)
+            self._set_combo(
+                self.capture_method_combo,
+                str(getattr(cfg, "window_capture_method", "auto") or "auto"),
+            )
+        finally:
+            self._loading_ui = False
+
+    def _on_ov_show_toggled(self, *_args) -> None:
+        if self._loading_ui:
+            return
+        # Keep at least one content surface enabled
+        if (
+            not self.ov_show_source_check.isChecked()
+            and not self.ov_show_translation_check.isChecked()
+        ):
+            self.ov_show_translation_check.blockSignals(True)
+            self.ov_show_translation_check.setChecked(True)
+            self.ov_show_translation_check.blockSignals(False)
+        self._mark_dirty()
+
+    def _on_obs_show_toggled(self, *_args) -> None:
+        if self._loading_ui:
+            return
+        if (
+            not self.obs_show_source_check.isChecked()
+            and not self.obs_show_translation_check.isChecked()
+        ):
+            self.obs_show_translation_check.blockSignals(True)
+            self.obs_show_translation_check.setChecked(True)
+            self.obs_show_translation_check.blockSignals(False)
+        self._mark_dirty()
 
     def set_result_text(self, text: str) -> None:
         self.result_view.setPlainText(text)
@@ -1607,8 +1781,17 @@ class MainWindow(QMainWindow):
                 self.work_status.style().polish(self.work_status)
 
     def set_busy(self, busy: bool) -> None:
-        self.btn_translate.setEnabled(not busy)
-        self.btn_region.setEnabled(not busy)
+        # Always re-enable when idle so a failed pipeline cannot leave UI stuck.
+        idle = not busy
+        self.btn_translate.setEnabled(idle)
+        self.btn_region.setEnabled(idle)
+        self.btn_start_monitor.setEnabled(idle and not self._monitor_running)
+        self.btn_stop_monitor.setEnabled(idle and self._monitor_running)
+        self.btn_apply.setEnabled(idle)
+        self.btn_save.setEnabled(idle)
+        self.btn_cancel.setEnabled(idle)
+        self.window_combo.setEnabled(idle)
+        self.btn_refresh.setEnabled(idle)
         if busy and hasattr(self, "work_status"):
             cur = self.work_status.text() or tr("status.processing")
             self.set_status(cur, busy=True)
@@ -1616,6 +1799,7 @@ class MainWindow(QMainWindow):
             self.work_status.setProperty("busy", "false")
             self.work_status.style().unpolish(self.work_status)
             self.work_status.style().polish(self.work_status)
+            self._set_monitor_buttons(self._monitor_running)
 
     def set_overlay_button_state(self, visible: bool) -> None:
         self._overlay_visible = bool(visible)

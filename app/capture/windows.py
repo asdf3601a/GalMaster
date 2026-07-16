@@ -97,6 +97,82 @@ def get_window_screen_rect(hwnd: int) -> tuple[int, int, int, int]:
     return win32gui.GetWindowRect(hwnd)
 
 
+def get_extended_frame_bounds(hwnd: int) -> tuple[int, int, int, int] | None:
+    """
+    DWM extended frame bounds (screen L,T,R,B) — often matches WGC frame better
+    than GetWindowRect (excludes drop shadow).
+    """
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        class RECT(ctypes.Structure):
+            _fields_ = [
+                ("left", wintypes.LONG),
+                ("top", wintypes.LONG),
+                ("right", wintypes.LONG),
+                ("bottom", wintypes.LONG),
+            ]
+
+        DWMWA_EXTENDED_FRAME_BOUNDS = 9
+        rect = RECT()
+        hr = ctypes.windll.dwmapi.DwmGetWindowAttribute(
+            wintypes.HWND(int(hwnd)),
+            ctypes.c_uint(DWMWA_EXTENDED_FRAME_BOUNDS),
+            ctypes.byref(rect),
+            ctypes.sizeof(rect),
+        )
+        if hr != 0:
+            return None
+        return int(rect.left), int(rect.top), int(rect.right), int(rect.bottom)
+    except Exception:
+        return None
+
+
+def client_region_to_window_image_crop(
+    hwnd: int,
+    rel_x: int,
+    rel_y: int,
+    rel_w: int,
+    rel_h: int,
+    *,
+    frame_w: int,
+    frame_h: int,
+) -> tuple[int, int, int, int] | None:
+    """
+    Map client-relative OCR region to crop box (x1,y1,x2,y2) inside a full-window
+    capture of size (frame_w, frame_h). Uses DWM bounds when available.
+    """
+    if frame_w <= 0 or frame_h <= 0 or rel_w <= 0 or rel_h <= 0:
+        return None
+    try:
+        bounds = get_extended_frame_bounds(hwnd)
+        if bounds is None:
+            wl, wt, wr, wb = get_window_screen_rect(hwnd)
+        else:
+            wl, wt, wr, wb = bounds
+        win_w = max(1, wr - wl)
+        win_h = max(1, wb - wt)
+        origin = win32gui.ClientToScreen(hwnd, (0, 0))
+        # Client (0,0) offset within window bounds (screen space)
+        ox = origin[0] - wl
+        oy = origin[1] - wt
+        # Scale window coords → captured frame pixels
+        sx = frame_w / float(win_w)
+        sy = frame_h / float(win_h)
+        x1 = int(round((ox + rel_x) * sx))
+        y1 = int(round((oy + rel_y) * sy))
+        x2 = int(round((ox + rel_x + rel_w) * sx))
+        y2 = int(round((oy + rel_y + rel_h) * sy))
+        x1 = max(0, min(x1, frame_w - 1))
+        y1 = max(0, min(y1, frame_h - 1))
+        x2 = max(x1 + 1, min(x2, frame_w))
+        y2 = max(y1 + 1, min(y2, frame_h))
+        return x1, y1, x2, y2
+    except Exception:
+        return None
+
+
 def bring_window_to_front(hwnd: int) -> None:
     try:
         if win32gui.IsIconic(hwnd):

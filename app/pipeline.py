@@ -20,6 +20,7 @@ from app.capture.screenshot import (
 from app.config import AppConfig
 from app.i18n import tr
 from app.ocr.base import OCREngine, create_ocr_engine
+from app.pipeline_queue import buffer_cap, enqueue_job
 from app.translate.cache import TranslationCache
 from app.translate.llm_translator import (
     LLMTranslator,
@@ -109,6 +110,9 @@ class _Worker(QObject):
                     abs_y=int(getattr(cfg, "region_abs_y", 0) or 0),
                     abs_w=int(getattr(cfg, "region_abs_w", 0) or 0),
                     abs_h=int(getattr(cfg, "region_abs_h", 0) or 0),
+                    method=str(
+                        getattr(cfg, "window_capture_method", "auto") or "auto"
+                    ),
                 )
 
             if self._abort:
@@ -126,11 +130,15 @@ class _Worker(QObject):
                 pass
 
             if is_mostly_blank(img):
+                # Status only — keep last overlay / result panel content
                 self.finished.emit(
                     PipelineResult(
                         "",
                         "",
-                        error=tr("pipe.blank", info=describe_image(img)),
+                        skipped=True,
+                        status_message=tr(
+                            "pipe.blank", info=describe_image(img)
+                        ),
                     )
                 )
                 return
@@ -158,11 +166,15 @@ class _Worker(QObject):
             )
             return
         if not source:
+            # No text: refresh status only — do not wipe overlay or last result
             self.finished.emit(
                 PipelineResult(
                     "",
                     "",
-                    error=tr("pipe.ocr_empty", info=describe_image(img)),
+                    skipped=True,
+                    status_message=tr(
+                        "pipe.ocr_empty", info=describe_image(img)
+                    ),
                 )
             )
             return
@@ -218,13 +230,24 @@ class _Worker(QObject):
             if hist_n
             else tr("pipe.llm")
         )
-        translator = self._make_translator(cfg)
-        translated = translator.translate(
-            source,
-            cfg.source_lang,
-            cfg.target_lang,
-            history=history,
-        )
+        try:
+            translator = self._make_translator(cfg)
+            translated = translator.translate(
+                source,
+                cfg.source_lang,
+                cfg.target_lang,
+                history=history,
+            )
+        except Exception as exc:
+            # Soft error: keep OCR text so UI/OBS stay usable; never hang on API faults.
+            self.finished.emit(
+                PipelineResult(
+                    source,
+                    "",
+                    error=tr("pipe.llm_error", err=str(exc)[:500]),
+                )
+            )
+            return
         self._cache.put(cache_key, translated)
         self._push_history(source, translated)
         self.progress.emit(tr("pipe.translate_done"))
@@ -286,14 +309,27 @@ class _Worker(QObject):
             if hist_n
             else tr("pipe.vlm")
         )
-        translator = self._make_translator(cfg)
-        source, translated = translator.translate_image(
-            img,
-            cfg.source_lang,
-            cfg.target_lang,
-            history=history,
-        )
+        try:
+            translator = self._make_translator(cfg)
+            source, translated = translator.translate_image(
+                img,
+                cfg.source_lang,
+                cfg.target_lang,
+                history=history,
+            )
+        except Exception as exc:
+            # Mark frame seen so auto-monitor does not immediately re-spam the same image.
+            self._last_image_fp = img_fp
+            self.finished.emit(
+                PipelineResult(
+                    "",
+                    "",
+                    error=tr("pipe.llm_error", err=str(exc)[:500]),
+                )
+            )
+            return
         if not (translated or "").strip() and not (source or "").strip():
+            self._last_image_fp = img_fp
             self.finished.emit(
                 PipelineResult("", "", error=tr("pipe.vlm_empty"))
             )
@@ -428,11 +464,25 @@ class TranslationPipeline(QObject):
         self._worker.preview_ready.connect(self.preview_ready)
         self._thread.start()
         self._busy = False
-        self._pending: PipelineJob | None = None
+        # Waiting jobs only (running job is not stored here). Bounded by cfg.
+        self._queue: deque[PipelineJob] = deque()
 
     @property
     def busy(self) -> bool:
         return self._busy
+
+    @property
+    def queue_depth(self) -> int:
+        """Number of jobs waiting (not including the running job)."""
+        return len(self._queue)
+
+    def clear_auto_queue(self) -> None:
+        """Drop waiting auto (non-force) jobs; keep force jobs if any."""
+        if not self._queue:
+            return
+        kept = [j for j in self._queue if j.force]
+        self._queue.clear()
+        self._queue.extend(kept)
 
     def request(
         self,
@@ -443,24 +493,30 @@ class TranslationPipeline(QObject):
     ) -> None:
         # Snapshot config so mid-job UI mutations cannot race the worker
         job = PipelineJob(cfg=deepcopy(cfg), image=image, force=force)
+        cap = buffer_cap(getattr(cfg, "pipeline_buffer_size", 3))
         if self._busy:
-            if self._pending is not None and self._pending.force:
-                job.force = True
-            self._pending = job
+            # If a force job is already waiting, preserve force on coalesce path
+            if force:
+                enqueue_job(self._queue, job, cap=cap, force=True)
+            else:
+                enqueue_job(self._queue, job, cap=cap, force=False)
             return
         self._busy = True
         self.busy_changed.emit(True)
         self._submit.emit(job)
 
     def _on_finished(self, result: object) -> None:
-        self.finished.emit(result)
-        if self._pending is not None:
-            job = self._pending
-            self._pending = None
-            self._submit.emit(job)
-        else:
-            self._busy = False
-            self.busy_changed.emit(False)
+        # Always clear busy / drain queue even if a UI slot raises on the result.
+        try:
+            self.finished.emit(result)
+        finally:
+            if self._queue:
+                job = self._queue.popleft()
+                # Stay busy for the next queued job
+                self._submit.emit(job)
+            else:
+                self._busy = False
+                self.busy_changed.emit(False)
 
     def reset_dedupe(self) -> None:
         self._cmd_reset_dedupe.emit()
@@ -472,7 +528,7 @@ class TranslationPipeline(QObject):
         self._cmd_clear_cache.emit()
 
     def shutdown(self) -> None:
-        self._pending = None
+        self._queue.clear()
         self._cmd_abort.emit()
         # Allow the worker thread event loop to process abort + finish current slot
         self._thread.quit()

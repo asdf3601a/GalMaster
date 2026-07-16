@@ -263,13 +263,19 @@ def _normalize_anthropic_base(base_url: str) -> str:
     return url
 
 
+# Chat/completions: fail fast enough that the UI does not look frozen.
+DEFAULT_LLM_TIMEOUT_S = 60.0
+# Model list is usually quick; keep a shorter bound.
+DEFAULT_MODELS_TIMEOUT_S = 30.0
+
+
 def _http_json(
     method: str,
     url: str,
     *,
     headers: dict[str, str],
     body: dict[str, Any] | None = None,
-    timeout: float = 120.0,
+    timeout: float = DEFAULT_LLM_TIMEOUT_S,
 ) -> dict[str, Any]:
     data = None if body is None else json.dumps(body).encode("utf-8")
     req = Request(url, data=data, headers=headers, method=method)
@@ -283,11 +289,20 @@ def _http_json(
         except Exception:
             detail = str(exc)
         raise RuntimeError(f"HTTP {exc.code}: {detail[:500]}") from exc
+    except TimeoutError as exc:
+        raise RuntimeError(f"連線逾時（{timeout:.0f}s）") from exc
     except URLError as exc:
-        raise RuntimeError(f"連線失敗: {exc.reason}") from exc
+        reason = getattr(exc, "reason", None) or exc
+        # socket.timeout is often wrapped as URLError
+        if isinstance(reason, TimeoutError) or "timed out" in str(reason).lower():
+            raise RuntimeError(f"連線逾時（{timeout:.0f}s）") from exc
+        raise RuntimeError(f"連線失敗: {reason}") from exc
     if not raw.strip():
         return {}
-    return json.loads(raw)
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"API 回傳非 JSON：{raw[:200]}") from exc
 
 
 def _extract_model_ids(payload: Any) -> list[str]:
@@ -500,13 +515,16 @@ class LLMTranslator:
             *messages,
         ]
         sampling = self._sampling()
-        # Prefer official SDK when available for better error handling / retries
+        # Prefer official SDK when available; pin timeout/retries so faults
+        # cannot leave the pipeline (and UI busy flag) blocked for minutes.
         try:
             from openai import OpenAI
 
             client = OpenAI(
                 api_key=self.api_key,
                 base_url=_normalize_openai_base(self.base_url),
+                timeout=DEFAULT_LLM_TIMEOUT_S,
+                max_retries=1,
             )
             resp = client.chat.completions.create(
                 model=self.model,
@@ -532,7 +550,9 @@ class LLMTranslator:
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
         }
-        data = _http_json("POST", url, headers=headers, body=payload)
+        data = _http_json(
+            "POST", url, headers=headers, body=payload, timeout=DEFAULT_LLM_TIMEOUT_S
+        )
         choices = data.get("choices") or []
         if not choices:
             raise RuntimeError(f"OpenAI 相容 API 無回傳 choices: {str(data)[:300]}")
@@ -564,6 +584,8 @@ class LLMTranslator:
             client = OpenAI(
                 api_key=self.api_key,
                 base_url=_normalize_openai_base(self.base_url),
+                timeout=DEFAULT_LLM_TIMEOUT_S,
+                max_retries=1,
             )
             resp = client.chat.completions.create(
                 model=self.model,
@@ -588,7 +610,9 @@ class LLMTranslator:
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
         }
-        data = _http_json("POST", url, headers=headers, body=payload)
+        data = _http_json(
+            "POST", url, headers=headers, body=payload, timeout=DEFAULT_LLM_TIMEOUT_S
+        )
         choices = data.get("choices") or []
         if not choices:
             raise RuntimeError(f"OpenAI 相容 API 無回傳 choices: {str(data)[:300]}")
@@ -613,7 +637,9 @@ class LLMTranslator:
             "Authorization": f"Bearer {self.api_key}",
         }
 
-        data = _http_json("POST", url, headers=headers, body=payload)
+        data = _http_json(
+            "POST", url, headers=headers, body=payload, timeout=DEFAULT_LLM_TIMEOUT_S
+        )
         return self._parse_anthropic_content(data)
 
     def _vlm_anthropic(
@@ -652,7 +678,9 @@ class LLMTranslator:
             "content-type": "application/json",
             "Authorization": f"Bearer {self.api_key}",
         }
-        data = _http_json("POST", url, headers=headers, body=payload)
+        data = _http_json(
+            "POST", url, headers=headers, body=payload, timeout=DEFAULT_LLM_TIMEOUT_S
+        )
         return self._parse_anthropic_content(data)
 
     @staticmethod

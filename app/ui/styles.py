@@ -24,7 +24,37 @@ QLineEdit, QComboBox, QSpinBox, QDoubleSpinBox, QTextEdit, QPlainTextEdit {
     border: 1px solid #45455a;
     border-radius: 6px;
     padding: 6px 8px;
+    min-height: 18px;
     selection-background-color: #5b6cff;
+}
+QComboBox::drop-down {
+    border: none;
+    width: 22px;
+}
+QComboBox::down-arrow {
+    width: 0;
+    height: 0;
+    border-left: 4px solid transparent;
+    border-right: 4px solid transparent;
+    border-top: 5px solid #c8c8d8;
+    margin-right: 8px;
+}
+QComboBox QAbstractItemView {
+    background-color: #2a2a34;
+    border: 1px solid #45455a;
+    selection-background-color: #5b6cff;
+    color: #e8e8ef;
+    outline: none;
+}
+QSpinBox::up-button, QSpinBox::down-button,
+QDoubleSpinBox::up-button, QDoubleSpinBox::down-button {
+    background-color: #353545;
+    border: none;
+    width: 18px;
+}
+QSpinBox::up-button:hover, QSpinBox::down-button:hover,
+QDoubleSpinBox::up-button:hover, QDoubleSpinBox::down-button:hover {
+    background-color: #45455a;
 }
 QPushButton {
     background-color: #4c5fff;

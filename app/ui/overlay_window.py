@@ -1,7 +1,7 @@
 """Always-on-top translucent translation overlay (display-only).
 
 All settings (opacity, font, click-through, show/hide, style) live in the main window.
-This window only shows text and can be dragged when click-through is off.
+This window shows text; when click-through is off it can be moved and edge-resized.
 """
 
 from __future__ import annotations
@@ -9,8 +9,8 @@ from __future__ import annotations
 import ctypes
 from typing import Any
 
-from PySide6.QtCore import QPoint, Qt, Signal
-from PySide6.QtGui import QFont
+from PySide6.QtCore import QEvent, QObject, QPoint, QRect, Qt, Signal
+from PySide6.QtGui import QCursor, QFont, QMouseEvent
 from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
@@ -26,6 +26,14 @@ GWL_EXSTYLE = -20
 WS_EX_LAYERED = 0x00080000
 WS_EX_TRANSPARENT = 0x00000020
 user32 = ctypes.windll.user32
+
+# Edge hit thickness for frameless resize (logical px)
+_RESIZE_MARGIN = 8
+
+_EDGE_LEFT = 1
+_EDGE_RIGHT = 2
+_EDGE_TOP = 4
+_EDGE_BOTTOM = 8
 
 
 def _set_click_through(hwnd: int, enable: bool) -> None:
@@ -46,6 +54,7 @@ class OverlayWindow(QWidget):
 
     closed = Signal()
     visibility_changed = Signal(bool)
+    geometry_changed = Signal()
 
     def __init__(self) -> None:
         super().__init__(None)
@@ -58,8 +67,13 @@ class OverlayWindow(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
         self.setMinimumSize(240, 120)
+        self.setMouseTracking(True)
 
         self._drag_pos: QPoint | None = None
+        self._resize_edges = 0
+        self._resize_origin_geo: QRect | None = None
+        self._resize_origin_global: QPoint | None = None
+        self._geo_at_press: QRect | None = None
         self._click_through = False
         self._show_source = True
         self._show_translation = True
@@ -82,6 +96,7 @@ class OverlayWindow(QWidget):
         self.panel = QFrame()
         self.panel.setObjectName("panel")
         self.panel.setStyleSheet(OVERLAY_PANEL_STYLE)
+        self.panel.setMouseTracking(True)
         layout = QVBoxLayout(self.panel)
         layout.setContentsMargins(12, 10, 12, 12)
         layout.setSpacing(6)
@@ -120,6 +135,15 @@ class OverlayWindow(QWidget):
         root.addWidget(self.panel)
         self._apply_fonts()
         self._apply_alignment()
+        # Edge resize must work even when the cursor is over child labels
+        self._install_mouse_filters(self)
+
+    def _install_mouse_filters(self, widget: QWidget) -> None:
+        widget.setMouseTracking(True)
+        widget.installEventFilter(self)
+        for child in widget.findChildren(QWidget):
+            child.setMouseTracking(True)
+            child.installEventFilter(self)
 
     def apply_style(self, style: Any = None, **kwargs: Any) -> None:
         """Apply display/style options from AppConfig or a dict-like / kwargs."""
@@ -231,7 +255,8 @@ class OverlayWindow(QWidget):
         hwnd = int(self.winId())
         if hwnd:
             _set_click_through(hwnd, self._click_through)
-        # When click-through, text selection / drag is off; show a light hint
+        if self._click_through:
+            self.unsetCursor()
         self.hint_label.setText(
             tr("overlay.hint_clickthrough")
             if self._click_through
@@ -268,41 +293,229 @@ class OverlayWindow(QWidget):
         self._last_translation = translation or ""
         self._last_status = status or ""
 
-        if self._show_source and self._last_source:
-            self.source_label.setText(self._last_source)
-            self.source_label.setVisible(True)
+        show_src = bool(self._show_source and self._last_source)
+        if show_src:
+            if self.source_label.text() != self._last_source:
+                self.source_label.setText(self._last_source)
         else:
-            self.source_label.setText("")
-            self.source_label.setVisible(False)
+            if self.source_label.text():
+                self.source_label.setText("")
+        if self.source_label.isVisible() != show_src:
+            self.source_label.setVisible(show_src)
 
-        if self._show_translation:
-            self.translation_label.setText(self._last_translation or "…")
-            self.translation_label.setVisible(True)
+        show_tr = bool(self._show_translation)
+        tr_text = (self._last_translation or "…") if show_tr else ""
+        if show_tr:
+            if self.translation_label.text() != tr_text:
+                self.translation_label.setText(tr_text)
         else:
-            self.translation_label.setText("")
-            self.translation_label.setVisible(False)
+            if self.translation_label.text():
+                self.translation_label.setText("")
+        if self.translation_label.isVisible() != show_tr:
+            self.translation_label.setVisible(show_tr)
 
-        self.status_label.setText(status)
+        if self.status_label.text() != (status or ""):
+            self.status_label.setText(status or "")
         if show and not self.isVisible():
             self.show()
 
     def set_status(self, text: str) -> None:
-        self.status_label.setText(text)
+        if self.status_label.text() != text:
+            self.status_label.setText(text)
+
+    def _hit_edges(self, pos: QPoint) -> int:
+        """Return edge bitmask for local position."""
+        edges = 0
+        m = _RESIZE_MARGIN
+        r = self.rect()
+        if pos.x() <= m:
+            edges |= _EDGE_LEFT
+        elif pos.x() >= r.width() - m:
+            edges |= _EDGE_RIGHT
+        if pos.y() <= m:
+            edges |= _EDGE_TOP
+        elif pos.y() >= r.height() - m:
+            edges |= _EDGE_BOTTOM
+        return edges
+
+    def _cursor_for_edges(self, edges: int) -> Qt.CursorShape:
+        if edges in (_EDGE_LEFT | _EDGE_TOP, _EDGE_RIGHT | _EDGE_BOTTOM):
+            return Qt.CursorShape.SizeFDiagCursor
+        if edges in (_EDGE_RIGHT | _EDGE_TOP, _EDGE_LEFT | _EDGE_BOTTOM):
+            return Qt.CursorShape.SizeBDiagCursor
+        if edges in (_EDGE_LEFT, _EDGE_RIGHT):
+            return Qt.CursorShape.SizeHorCursor
+        if edges in (_EDGE_TOP, _EDGE_BOTTOM):
+            return Qt.CursorShape.SizeVerCursor
+        return Qt.CursorShape.ArrowCursor
+
+    def _update_hover_cursor(self, pos: QPoint) -> None:
+        if self._click_through:
+            return
+        edges = self._hit_edges(pos)
+        self.setCursor(QCursor(self._cursor_for_edges(edges)))
+
+    def eventFilter(self, watched: QObject, event: QEvent) -> bool:  # noqa: N802
+        """Edge resize + cursor even when the pointer is over child widgets.
+
+        Interior left-drag still moves the window (via press interception on
+        non-text chrome and self.mousePressEvent). Text labels keep selection
+        unless the press starts on an edge.
+        """
+        if self._click_through:
+            return super().eventFilter(watched, event)
+        et = event.type()
+        if not isinstance(event, QMouseEvent):
+            return super().eventFilter(watched, event)
+
+        global_pos = event.globalPosition().toPoint()
+        pos = self.mapFromGlobal(global_pos)
+
+        # Active resize/move: keep handling until release
+        if et == QEvent.Type.MouseMove:
+            if self._resize_edges and event.buttons() & Qt.MouseButton.LeftButton:
+                self._apply_resize(global_pos)
+                return True
+            if self._drag_pos is not None and event.buttons() & Qt.MouseButton.LeftButton:
+                self.move(global_pos - self._drag_pos)
+                return True
+            # Don't thrash cursor while user is selecting text
+            if event.buttons() & Qt.MouseButton.LeftButton:
+                return False
+            if self.rect().contains(pos):
+                self._update_hover_cursor(pos)
+            return False
+
+        if et == QEvent.Type.MouseButtonPress and event.button() == Qt.MouseButton.LeftButton:
+            if not self.rect().contains(pos):
+                return False
+            edges = self._hit_edges(pos)
+            if edges:
+                self._geo_at_press = QRect(self.geometry())
+                self._resize_edges = edges
+                self._resize_origin_geo = QRect(self.geometry())
+                self._resize_origin_global = global_pos
+                self._drag_pos = None
+                return True
+            # Header / status chrome: start move (leave source/translation free)
+            if watched in (
+                self.title_label,
+                self.hint_label,
+                self.status_label,
+                self.panel,
+                self,
+            ):
+                self._geo_at_press = QRect(self.geometry())
+                self._resize_edges = 0
+                self._resize_origin_geo = None
+                self._resize_origin_global = None
+                self._drag_pos = global_pos - self.frameGeometry().topLeft()
+                return True
+            return False
+
+        if et == QEvent.Type.MouseButtonRelease and event.button() == Qt.MouseButton.LeftButton:
+            if self._drag_pos is None and not self._resize_edges and self._geo_at_press is None:
+                return False
+            moved = (
+                self._geo_at_press is not None and self.geometry() != self._geo_at_press
+            )
+            self._drag_pos = None
+            self._resize_edges = 0
+            self._resize_origin_geo = None
+            self._resize_origin_global = None
+            self._geo_at_press = None
+            if moved:
+                self.geometry_changed.emit()
+            if self.rect().contains(pos):
+                self._update_hover_cursor(pos)
+            return True
+
+        return super().eventFilter(watched, event)
+
+    def _apply_resize(self, global_pos: QPoint) -> None:
+        assert self._resize_origin_geo is not None
+        assert self._resize_origin_global is not None
+        delta = global_pos - self._resize_origin_global
+        geo = QRect(self._resize_origin_geo)
+        min_w = self.minimumWidth()
+        min_h = self.minimumHeight()
+        edges = self._resize_edges
+
+        left = geo.left()
+        top = geo.top()
+        right = geo.right()
+        bottom = geo.bottom()
+
+        if edges & _EDGE_LEFT:
+            left = min(geo.left() + delta.x(), right - min_w + 1)
+        if edges & _EDGE_RIGHT:
+            right = max(geo.right() + delta.x(), left + min_w - 1)
+        if edges & _EDGE_TOP:
+            top = min(geo.top() + delta.y(), bottom - min_h + 1)
+        if edges & _EDGE_BOTTOM:
+            bottom = max(geo.bottom() + delta.y(), top + min_h - 1)
+
+        self.setGeometry(QRect(QPoint(left, top), QPoint(right, bottom)))
 
     def mousePressEvent(self, event) -> None:  # noqa: N802
-        if event.button() == Qt.MouseButton.LeftButton and not self._click_through:
-            self._drag_pos = (
-                event.globalPosition().toPoint() - self.frameGeometry().topLeft()
-            )
+        # Fallback when press lands on the window chrome itself
+        if (
+            event.button() == Qt.MouseButton.LeftButton
+            and not self._click_through
+            and self._drag_pos is None
+            and not self._resize_edges
+        ):
+            pos = event.position().toPoint()
+            edges = self._hit_edges(pos)
+            self._geo_at_press = QRect(self.geometry())
+            if edges:
+                self._resize_edges = edges
+                self._resize_origin_geo = QRect(self.geometry())
+                self._resize_origin_global = event.globalPosition().toPoint()
+            else:
+                self._drag_pos = (
+                    event.globalPosition().toPoint() - self.frameGeometry().topLeft()
+                )
             event.accept()
+            return
+        super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event) -> None:  # noqa: N802
+        if self._click_through:
+            return super().mouseMoveEvent(event)
+        if self._resize_edges and event.buttons() & Qt.MouseButton.LeftButton:
+            self._apply_resize(event.globalPosition().toPoint())
+            event.accept()
+            return
         if self._drag_pos is not None and event.buttons() & Qt.MouseButton.LeftButton:
             self.move(event.globalPosition().toPoint() - self._drag_pos)
             event.accept()
+            return
+        self._update_hover_cursor(event.position().toPoint())
+        super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event) -> None:  # noqa: N802
-        self._drag_pos = None
+        if event.button() == Qt.MouseButton.LeftButton and not self._click_through:
+            moved = (
+                self._geo_at_press is not None
+                and self.geometry() != self._geo_at_press
+            )
+            if self._drag_pos is not None or self._resize_edges or self._geo_at_press:
+                self._drag_pos = None
+                self._resize_edges = 0
+                self._resize_origin_geo = None
+                self._resize_origin_global = None
+                self._geo_at_press = None
+                if moved:
+                    self.geometry_changed.emit()
+                event.accept()
+                return
+        super().mouseReleaseEvent(event)
+
+    def leaveEvent(self, event) -> None:  # noqa: N802
+        if not self._resize_edges and not self._click_through:
+            self.unsetCursor()
+        super().leaveEvent(event)
 
     def closeEvent(self, event) -> None:  # noqa: N802
         self.closed.emit()

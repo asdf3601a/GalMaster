@@ -1,4 +1,9 @@
-"""Screenshot capture for screen regions and bound HWNDs."""
+"""Screenshot capture for screen regions and bound HWNDs.
+
+Capture policy (aligned with OBS Window Capture Automatic):
+  - No bound HWND / full-screen region → display capture (mss → GDI desktop → ImageGrab)
+  - Bound HWND → window capture: WGC → BitBlt/PrintWindow → screen fallback
+"""
 
 from __future__ import annotations
 
@@ -17,6 +22,8 @@ if TYPE_CHECKING:
 user32 = ctypes.windll.user32
 gdi32 = ctypes.windll.gdi32
 PW_RENDERFULLCONTENT = 0x00000002
+
+_VALID_METHODS = frozenset({"auto", "wgc", "bitblt"})
 
 
 class BITMAPINFOHEADER(ctypes.Structure):
@@ -153,11 +160,18 @@ def is_mostly_blank(img: Image.Image, *, threshold: float = 0.02) -> bool:
 
 
 def capture_hwnd_client(hwnd: int) -> Image.Image | None:
-    """Capture entire client area of a window via PrintWindow/BitBlt."""
+    """
+    Capture entire client area of a window via PrintWindow / BitBlt (GDI).
+
+    Order (OBS BitBlt-family):
+      1) PrintWindow + PW_RENDERFULLCONTENT
+      2) PrintWindow flag 0
+      3) BitBlt from window DC
+    """
     try:
+        import win32con
         import win32gui
         import win32ui
-        import win32con
     except ImportError:
         return None
 
@@ -178,9 +192,11 @@ def capture_hwnd_client(hwnd: int) -> Image.Image | None:
         bitmap.CreateCompatibleBitmap(mfc_dc, w, h)
         save_dc.SelectObject(bitmap)
 
-        result = user32.PrintWindow(hwnd, save_dc.GetSafeHdc(), PW_RENDERFULLCONTENT)
-        if result != 1:
-            # Fallback BitBlt from window DC
+        hdc = save_dc.GetSafeHdc()
+        ok = user32.PrintWindow(hwnd, hdc, PW_RENDERFULLCONTENT)
+        if ok != 1:
+            ok = user32.PrintWindow(hwnd, hdc, 0)
+        if ok != 1:
             save_dc.BitBlt((0, 0), (w, h), mfc_dc, (0, 0), win32con.SRCCOPY)
 
         bmpinfo = bitmap.GetInfo()
@@ -220,6 +236,56 @@ def capture_hwnd_client(hwnd: int) -> Image.Image | None:
             pass
 
 
+def _crop_client_from_hwnd_image(
+    full: Image.Image,
+    rel_x: int,
+    rel_y: int,
+    rel_w: int,
+    rel_h: int,
+) -> Image.Image | None:
+    """Crop client-relative region from a client-area bitmap."""
+    x2 = min(full.width, rel_x + rel_w)
+    y2 = min(full.height, rel_y + rel_h)
+    x1 = max(0, rel_x)
+    y1 = max(0, rel_y)
+    if x2 > x1 and y2 > y1:
+        return full.crop((x1, y1, x2, y2))
+    return None
+
+
+def _crop_client_from_window_frame(
+    hwnd: int,
+    full: Image.Image,
+    rel_x: int,
+    rel_y: int,
+    rel_w: int,
+    rel_h: int,
+) -> Image.Image | None:
+    """Crop client-relative region from a full-window WGC frame."""
+    from .windows import client_region_to_window_image_crop
+
+    box = client_region_to_window_image_crop(
+        hwnd,
+        rel_x,
+        rel_y,
+        rel_w,
+        rel_h,
+        frame_w=full.width,
+        frame_h=full.height,
+    )
+    if box is None:
+        return None
+    x1, y1, x2, y2 = box
+    if x2 > x1 and y2 > y1:
+        return full.crop((x1, y1, x2, y2))
+    return None
+
+
+def _normalize_method(method: str | None) -> str:
+    m = (method or "auto").strip().lower()
+    return m if m in _VALID_METHODS else "auto"
+
+
 def capture_region(
     *,
     hwnd: int | None,
@@ -227,61 +293,95 @@ def capture_region(
     rel_y: int,
     rel_w: int,
     rel_h: int,
-    prefer_screen: bool = True,
+    prefer_screen: bool = False,
     abs_x: int = 0,
     abs_y: int = 0,
     abs_w: int = 0,
     abs_h: int = 0,
+    method: str = "auto",
 ) -> Image.Image:
     """
     Capture OCR region.
 
-    Prefer **screen capture via mss** (works from any thread; reliable for games).
-    When hwnd is valid, region is relative to client area and converted to screen.
-    When hwnd is stale, fall back to last-known absolute screen rect if provided.
+    Bound HWND (window capture, OBS Automatic order unless overridden):
+      WGC → GDI PrintWindow/BitBlt → screen region fallback
+
+    No HWND: absolute / relative screen region via mss.
+
+    *prefer_screen* is legacy; when True and hwnd set, skips WGC/GDI and uses
+    screen coords only (debug). Default False.
     """
     if rel_w <= 0 or rel_h <= 0:
         if abs_w > 0 and abs_h > 0:
             return capture_screen_region(abs_x, abs_y, abs_w, abs_h)
         raise ValueError("尚未框選 OCR 區域或尺寸無效")
 
-    screen_img: Image.Image | None = None
-    hwnd_img: Image.Image | None = None
+    method = _normalize_method(method)
 
     if hwnd:
-        from .windows import is_window_valid, client_to_screen_rect
+        from .windows import client_to_screen_rect, is_window_valid
 
         if is_window_valid(hwnd):
-            # Primary: screen coords of client-relative region (mss, thread-safe)
             if prefer_screen:
+                left, top, w, h = client_to_screen_rect(
+                    hwnd, rel_x, rel_y, rel_w, rel_h
+                )
+                return capture_screen_region(left, top, w, h)
+
+            wgc_img: Image.Image | None = None
+            gdi_img: Image.Image | None = None
+            try_wgc = method in ("auto", "wgc")
+            try_gdi = method in ("auto", "bitblt", "wgc")  # wgc still falls back to GDI
+
+            # 1) Windows Graphics Capture
+            if try_wgc:
                 try:
-                    left, top, w, h = client_to_screen_rect(
-                        hwnd, rel_x, rel_y, rel_w, rel_h
-                    )
-                    screen_img = capture_screen_region(left, top, w, h)
-                    if not is_mostly_blank(screen_img):
-                        return screen_img
+                    from .wgc import capture_hwnd_wgc
+
+                    full = capture_hwnd_wgc(int(hwnd))
+                    if full is not None and not is_mostly_blank(full):
+                        cropped = _crop_client_from_window_frame(
+                            int(hwnd), full, rel_x, rel_y, rel_w, rel_h
+                        )
+                        if cropped is not None and not is_mostly_blank(cropped):
+                            return cropped
+                        # Mapping failed: try client-style crop (frame ≈ client)
+                        alt = _crop_client_from_hwnd_image(
+                            full, rel_x, rel_y, rel_w, rel_h
+                        )
+                        if alt is not None and not is_mostly_blank(alt):
+                            return alt
+                        # Whole-client region: accept full frame
+                        try:
+                            from .windows import get_client_rect
+
+                            _cl, _ct, cr, cb = get_client_rect(int(hwnd))
+                            cw, ch = max(1, cr), max(1, cb)
+                            if rel_x <= 2 and rel_y <= 2 and rel_w >= cw - 4 and rel_h >= ch - 4:
+                                return full
+                        except Exception:
+                            pass
+                        wgc_img = alt or cropped
                 except Exception:
-                    screen_img = None
+                    wgc_img = None
 
-            # Secondary: HWND bitmap crop (may fail on DX/Chrome background threads)
-            full = capture_hwnd_client(hwnd)
-            if full is not None:
-                x2 = min(full.width, rel_x + rel_w)
-                y2 = min(full.height, rel_y + rel_h)
-                x1 = max(0, rel_x)
-                y1 = max(0, rel_y)
-                if x2 > x1 and y2 > y1:
-                    hwnd_img = full.crop((x1, y1, x2, y2))
-                    if not is_mostly_blank(hwnd_img):
-                        return hwnd_img
+            # 2) GDI PrintWindow / BitBlt
+            if try_gdi:
+                full = capture_hwnd_client(int(hwnd))
+                if full is not None:
+                    cropped = _crop_client_from_hwnd_image(
+                        full, rel_x, rel_y, rel_w, rel_h
+                    )
+                    if cropped is not None and not is_mostly_blank(cropped):
+                        return cropped
+                    gdi_img = cropped
 
-            # Last resort: return least-blank available
-            for candidate in (screen_img, hwnd_img):
-                if candidate is not None:
+            # Prefer least-blank intermediate before screen
+            for candidate in (wgc_img, gdi_img):
+                if candidate is not None and not is_mostly_blank(candidate):
                     return candidate
 
-            # Retry screen once more even if blank
+            # 3) Screen region fallback (display capture)
             left, top, w, h = client_to_screen_rect(hwnd, rel_x, rel_y, rel_w, rel_h)
             return capture_screen_region(left, top, w, h)
 
@@ -293,7 +393,7 @@ def capture_region(
             "請重新整理視窗列表並再框選 OCR 區域。"
         )
 
-    # Absolute screen region (no binding)
+    # Absolute screen region (no binding) — display capture only
     return capture_screen_region(rel_x, rel_y, rel_w, rel_h)
 
 
@@ -301,6 +401,7 @@ def capture_from_config(cfg: AppConfig) -> Image.Image:
     """Capture using AppConfig region / bound hwnd / last absolute screen rect."""
     if not cfg.has_region and not getattr(cfg, "has_abs_region", False):
         raise ValueError("尚未框選 OCR 區域")
+    method = str(getattr(cfg, "window_capture_method", "auto") or "auto")
     return capture_region(
         hwnd=cfg.bound_hwnd or None,
         rel_x=cfg.region_x,
@@ -311,6 +412,7 @@ def capture_from_config(cfg: AppConfig) -> Image.Image:
         abs_y=int(getattr(cfg, "region_abs_y", 0) or 0),
         abs_w=int(getattr(cfg, "region_abs_w", 0) or 0),
         abs_h=int(getattr(cfg, "region_abs_h", 0) or 0),
+        method=method,
     )
 
 

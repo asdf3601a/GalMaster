@@ -21,6 +21,7 @@ from app.hotkeys.global_hotkey import GlobalHotkeyFilter
 from app.i18n import set_language, tr
 from app.obs.server import ObsSubtitleServer
 from app.pipeline import PipelineResult, TranslationPipeline
+from app.pipeline_queue import buffer_cap
 from app.translate.llm_translator import list_models
 from app.ui.main_window import MainWindow
 from app.ui.overlay_window import OverlayWindow
@@ -28,15 +29,27 @@ from app.ui.region_selector import RegionSelector
 
 
 class AppController(QObject):
+    """
+    Orchestrates staged pipeline:
+      Detect (RegionMonitor) → Capture → Process buffer → Present
+    """
+
     _models_result = Signal(object, str)  # list[str] | None, error
+    # Capture runs off the UI thread; result marshalled back here (img | None, err | None)
+    _capture_finished = Signal(object, object)
 
     def __init__(self, app: QApplication) -> None:
         super().__init__()
         self.app = app
         self.cfg = load_config()
         set_language(getattr(self.cfg, "ui_language", "zh-Hant") or "zh-Hant")
+        # Capture stage state
         self._capturing = False
+        self._deferred_auto_captures = 0
+        self._pending_force_recapture = False
         self._overlay_was_visible = True
+        self._overlay_cloaked = False
+        self._overlay_saved_opacity = 1.0
         self._pending_force = True
         self._models_fetching = False
 
@@ -46,6 +59,7 @@ class AppController(QObject):
         self.pipeline = TranslationPipeline()
         self.monitor = RegionMonitor()
         self.hotkey = GlobalHotkeyFilter(self)
+        self._capture_finished.connect(self._on_capture_finished)
         self.obs = ObsSubtitleServer()
 
         self._setup_tray()
@@ -136,6 +150,7 @@ class AppController(QObject):
         self.app.installNativeEventFilter(self.hotkey)
 
         self.overlay.visibility_changed.connect(self._on_overlay_visibility)
+        self.overlay.geometry_changed.connect(self._on_overlay_geometry_changed)
         # Close main window (X) = full quit so Overlay / monitor / tray all go away
         self.main.hide_to_tray_requested.connect(self.shutdown)
         self.overlay.closed.connect(self._on_overlay_closed)
@@ -155,6 +170,16 @@ class AppController(QObject):
             self._tray_overlay_action.setText(
                 tr("tray.overlay_hide") if visible else tr("tray.overlay_show")
             )
+
+    def _on_overlay_geometry_changed(self) -> None:
+        """Persist overlay position/size after user move or edge-resize."""
+        try:
+            g = self.overlay.geometry()
+            self.cfg.overlay_x, self.cfg.overlay_y = g.x(), g.y()
+            self.cfg.overlay_w, self.cfg.overlay_h = g.width(), g.height()
+            self.persist()
+        except Exception:
+            pass
 
     def _on_overlay_closed(self) -> None:
         if getattr(self, "_shutting_down", False):
@@ -308,26 +333,38 @@ class AppController(QObject):
         self._sync_obs_server(cfg)
 
     def on_auto_monitor(self, enabled: bool) -> None:
-        # Immediate operational toggle via top-bar Start/Stop; mark dirty so Save persists
+        """Immediate operational toggle (like bind-window): apply monitor fields + persist, no dirty."""
         if enabled:
             if not self.cfg.has_region:
                 self.main.show_error("自動監控", "請先框選 OCR 區域")
                 self.cfg.auto_monitor = False
                 self.main.set_monitor_running(False)
                 return
-            # Pull wait-stable / thresholds from form draft so start feels responsive
+            # Pull monitor timing from form so Start uses current spin values
             draft = self.main.collect_config()
             self.cfg.monitor_stable_ms = draft.monitor_stable_ms
             self.cfg.monitor_wait_stable = draft.monitor_stable_ms > 0
             self.cfg.monitor_interval_ms = draft.monitor_interval_ms
             self.cfg.monitor_cooldown_ms = draft.monitor_cooldown_ms
             self.cfg.monitor_diff_threshold = draft.monitor_diff_threshold
+            self.cfg.pipeline_buffer_size = buffer_cap(
+                getattr(draft, "pipeline_buffer_size", 3)
+            )
+            self.cfg.window_capture_method = draft.window_capture_method
             self.pipeline.reset_dedupe()
+            self.pipeline.clear_auto_queue()
+            self._deferred_auto_captures = 0
+            self._pending_force_recapture = False
             self.monitor.start(self.cfg)
             running = self.monitor.is_running
             self.cfg.auto_monitor = running
             self.main.set_monitor_running(running)
-            self.main.mark_runtime_dirty()
+            # Sync applied snapshot monitor fields (operational, not draft dirty)
+            self.main.sync_operational_monitor(self.cfg)
+            try:
+                self.persist()
+            except Exception:
+                pass
             if not running:
                 self.main.set_status(
                     "自動監控啟動失敗（先前監控執行緒可能仍在結束）", busy=False
@@ -341,8 +378,13 @@ class AppController(QObject):
         else:
             self.cfg.auto_monitor = False
             self.monitor.stop()
+            self._deferred_auto_captures = 0
             self.main.set_monitor_running(False)
-            self.main.mark_runtime_dirty()
+            self.main.sync_operational_monitor(self.cfg)
+            try:
+                self.persist()
+            except Exception:
+                pass
             self.main.set_status("自動監控已關閉", busy=False)
 
     def _register_hotkey(self) -> None:
@@ -360,7 +402,10 @@ class AppController(QObject):
         """
         if not self.cfg.has_region and not self.cfg.has_abs_region:
             self.main.set_status("請先框選 OCR 區域", busy=False)
-            self.overlay.set_content(translation="請先框選 OCR 區域", status="錯誤")
+            try:
+                self.overlay.set_status(tr("status.error"))
+            except Exception:
+                pass
             return False
 
         if self.cfg.bound_hwnd and not is_window_valid(self.cfg.bound_hwnd):
@@ -386,58 +431,186 @@ class AppController(QObject):
                 self.main.set_status(
                     "綁定視窗已失效，請重新框選 OCR 區域", busy=False
                 )
-                self.overlay.set_content(
-                    translation="綁定視窗已失效，請重新框選 OCR 區域",
-                    status="錯誤",
-                )
+                try:
+                    self.overlay.set_status(tr("status.error"))
+                except Exception:
+                    pass
                 return False
         return True
 
     def translate_now(self, *, force: bool = True) -> None:
         """
-        Run capture → OCR → translate.
+        Capture stage entry (Detect fire / manual / hotkey).
 
-        force=True (manual button / hotkey): always run even if text/image unchanged.
-        force=False (auto-monitor): pipeline may skip when OCR text is identical.
+        force=True (manual button / hotkey): always process even if text unchanged;
+        clears waiting auto jobs when enqueued.
+        force=False (auto-monitor): may queue while Process is busy (bounded buffer).
         """
-        if self._capturing:
-            return
-        # Auto-monitor: skip while pipeline is busy to avoid thrashing overlay hide/show.
-        # Manual/hotkey (force=True) still runs (pipeline may coalesce pending jobs).
-        if not force and self.pipeline.busy:
-            return
         if not self._ensure_capture_target():
             return
 
+        cap = buffer_cap(getattr(self.cfg, "pipeline_buffer_size", 3))
+
+        # Capture stage busy: defer instead of dropping (bounded).
+        if self._capturing:
+            if force:
+                self._pending_force_recapture = True
+            else:
+                # Remaining room ≈ buffer slots not yet filled by deferred captures
+                room = max(0, cap - self._deferred_auto_captures)
+                if room > 0:
+                    self._deferred_auto_captures += 1
+            return
+
+        if force:
+            # Manual path: drop waiting auto backlog so user is not stuck behind it
+            self.pipeline.clear_auto_queue()
+            self._deferred_auto_captures = 0
+
+        self._start_capture(force=force)
+
+    def _start_capture(self, *, force: bool) -> None:
+        """Idle → Capturing (cloak if needed, then async grab)."""
         self._capturing = True
         self._pending_force = force
         self._overlay_was_visible = self.overlay.isVisible()
-        self.main.set_status("截圖中…", busy=True)
-        # Hide overlay so it never covers the OCR region; defer capture one tick
-        # (no processEvents re-entrancy)
-        self.overlay.hide()
-        QTimer.singleShot(40, self._capture_and_enqueue)
+        # Cloak only when capture may use *screen* pixels (unbound region / no HWND).
+        # Bound-window WGC/GDI does not include our overlay top-level window.
+        self._overlay_cloaked = False
+        self._overlay_saved_opacity = self.overlay.windowOpacity()
+        self.main.set_status(tr("pipe.capturing"), busy=True)
+        need_cloak = (
+            self._overlay_was_visible
+            and self._capture_may_use_screen()
+            and self._overlay_may_cover_region()
+        )
+        if need_cloak:
+            self.overlay.setWindowOpacity(0.0)
+            self._overlay_cloaked = True
+            QTimer.singleShot(40, self._capture_and_enqueue)
+        else:
+            QTimer.singleShot(0, self._capture_and_enqueue)
+
+    def _restore_overlay_after_capture(self) -> None:
+        """Undo temporary opacity cloak used during capture."""
+        if getattr(self, "_overlay_cloaked", False):
+            saved = float(getattr(self, "_overlay_saved_opacity", 1.0) or 1.0)
+            self.overlay.setWindowOpacity(max(0.3, min(1.0, saved)))
+            self._overlay_cloaked = False
+        if self._overlay_was_visible and not self.overlay.isVisible():
+            self.overlay.show()
+
+    def _capture_may_use_screen(self) -> bool:
+        """True when capture path is likely display/mss (overlay can appear in shot)."""
+        hwnd = int(getattr(self.cfg, "bound_hwnd", 0) or 0)
+        if hwnd and is_window_valid(hwnd):
+            # Window capture primary — overlay is a different top-level HWND
+            return False
+        return True
+
+    def _overlay_may_cover_region(self) -> bool:
+        """True when overlay geometry likely intersects the OCR capture rect."""
+        if not self.overlay.isVisible():
+            return False
+        try:
+            from app.capture.dpi import qt_rect_to_physical
+            from app.capture.windows import client_to_screen_rect, is_window_valid
+
+            # Capture rect in physical screen pixels
+            cfg = self.cfg
+            if cfg.bound_hwnd and is_window_valid(cfg.bound_hwnd):
+                rx, ry, rw, rh = client_to_screen_rect(
+                    cfg.bound_hwnd,
+                    cfg.region_x,
+                    cfg.region_y,
+                    cfg.region_w,
+                    cfg.region_h,
+                )
+            elif cfg.has_abs_region:
+                rx, ry, rw, rh = (
+                    int(cfg.region_abs_x),
+                    int(cfg.region_abs_y),
+                    int(cfg.region_abs_w),
+                    int(cfg.region_abs_h),
+                )
+            elif cfg.has_region:
+                rx, ry, rw, rh = (
+                    int(cfg.region_x),
+                    int(cfg.region_y),
+                    int(cfg.region_w),
+                    int(cfg.region_h),
+                )
+            else:
+                return True  # unknown region: be safe, cloak
+
+            # Overlay in physical pixels (Qt logical → physical)
+            g = self.overlay.frameGeometry()
+            ox, oy, ow, oh = qt_rect_to_physical(g.x(), g.y(), g.width(), g.height())
+
+            # Expand slightly so partial edge overlap still cloaks
+            pad = 4
+            return not (
+                ox + ow + pad <= rx
+                or rx + rw + pad <= ox
+                or oy + oh + pad <= ry
+                or ry + rh + pad <= oy
+            )
+        except Exception:
+            return True
 
     def _capture_and_enqueue(self) -> None:
+        """Kick off capture on a worker thread (WGC must not block the Qt UI)."""
+        cfg_snap = deepcopy(self.cfg)
+
+        def _work() -> None:
+            try:
+                img = capture_from_config(cfg_snap)
+                self._capture_finished.emit(img, None)
+            except Exception as exc:
+                self._capture_finished.emit(None, exc)
+
+        threading.Thread(target=_work, name="galmaster-capture", daemon=True).start()
+
+    def _on_capture_finished(self, img: object, err: object) -> None:
         force = self._pending_force
         was_visible = self._overlay_was_visible
-        try:
-            img = capture_from_config(self.cfg)
-        except Exception as exc:
-            self._capturing = False
-            if was_visible:
-                self.overlay.show()
-            self.main.set_status(f"截圖失敗：{exc}", busy=False)
-            self.overlay.set_content(translation=str(exc), status="錯誤")
-            return
-
         self._capturing = False
-        # Restore previous overlay visibility; always show status when it was open
+        self._restore_overlay_after_capture()
+        if err is not None:
+            # Status only — keep last overlay / result text (same as empty-OCR soft path)
+            self.main.set_status(f"截圖失敗：{err}", busy=False)
+            try:
+                self.overlay.set_status(tr("status.error"))
+            except Exception:
+                pass
+            # Still pump deferred captures after a failed grab
+            self._capture_pump_deferred()
+            return
         if was_visible:
-            self.overlay.show()
-            self.overlay.set_status("處理中…")
-
+            self.overlay.set_status(tr("status.processing"))
+        # Process stage: bounded FIFO absorbs backlog while worker is busy
         self.pipeline.request(self.cfg, img, force=force)
+        depth = self.pipeline.queue_depth
+        if depth > 0:
+            cap = buffer_cap(getattr(self.cfg, "pipeline_buffer_size", 3))
+            self.main.set_status(
+                tr("pipe.queued", n=depth, max=cap), busy=True
+            )
+        self._capture_pump_deferred()
+
+    def _capture_pump_deferred(self) -> None:
+        """After a capture ends, start force recapture or deferred auto grabs."""
+        if self._capturing:
+            return
+        if self._pending_force_recapture:
+            self._pending_force_recapture = False
+            self._deferred_auto_captures = 0
+            self.pipeline.clear_auto_queue()
+            self._start_capture(force=True)
+            return
+        if self._deferred_auto_captures > 0:
+            self._deferred_auto_captures -= 1
+            self._start_capture(force=False)
 
     def on_preview_ready(self, img: object) -> None:
         try:
@@ -570,8 +743,18 @@ class AppController(QObject):
 
     def on_pipeline_finished(self, result: object) -> None:
         assert isinstance(result, PipelineResult)
+        try:
+            self._present(result)
+        except Exception as exc:
+            # Never leave the UI stuck busy / unresponsive after a result.
+            try:
+                self.main.set_status(tr("pipe.error", err=str(exc)), busy=False)
+            except Exception:
+                pass
 
-        # Unchanged text / skipped: status only — never rewrite overlay content
+    def _present(self, result: PipelineResult) -> None:
+        """Present stage: apply Process result to main UI / Overlay / OBS."""
+        # Unchanged / no text / blank capture: status only — keep overlay + result panel
         if result.skipped:
             msg = result.status_message or tr("pipe.unchanged")
             self.main.set_status(msg, busy=False)
@@ -581,15 +764,15 @@ class AppController(QObject):
 
         # Show results on overlay when it is open, or was open when capture started
         if self._overlay_was_visible or self.overlay.isVisible():
-            self.overlay.show()
+            if not self.overlay.isVisible():
+                self.overlay.show()
 
+        # Hard error with no source: status + do NOT wipe last good overlay/result
+        # (user can still read the previous translation while diagnosing the fault)
         if result.error and not result.source_text:
             self.main.set_status(result.error, busy=False)
-            self.main.set_result_text(result.error)
-            self.overlay.set_content(
-                translation=result.error, status=tr("status.error")
-            )
-            # Do not overwrite OBS subtitle on hard errors (no usable text)
+            if self.overlay.isVisible():
+                self.overlay.set_status(result.error)
             return
         if result.error and result.source_text and not result.translated_text:
             self.main.set_status(result.error, busy=False)
@@ -604,13 +787,17 @@ class AppController(QObject):
                 source=result.source_text,
                 translation=result.error,
                 status=result.error,
+                show=False,
             )
             # Keep stream in sync with soft failure (source + error as translation)
-            self.obs.publish(
-                source=result.source_text,
-                translation=result.error,
-                status="error",
-            )
+            try:
+                self.obs.publish(
+                    source=result.source_text,
+                    translation=result.error,
+                    status="error",
+                )
+            except Exception:
+                pass
             return
 
         if result.ocr_only:
@@ -621,12 +808,16 @@ class AppController(QObject):
                 source=result.source_text,
                 translation=result.source_text,
                 status=tr("pipe.ocr_only_status"),
+                show=False,
             )
-            self.obs.publish(
-                source=result.source_text,
-                translation=result.source_text,
-                status="ocr_only",
-            )
+            try:
+                self.obs.publish(
+                    source=result.source_text,
+                    translation=result.source_text,
+                    status="ocr_only",
+                )
+            except Exception:
+                pass
             return
 
         cache_tag = tr("pipe.cache_tag") if result.from_cache else ""
@@ -642,12 +833,16 @@ class AppController(QObject):
             source=result.source_text,
             translation=result.translated_text,
             status=tr("pipe.done") + cache_tag,
+            show=False,
         )
-        self.obs.publish(
-            source=result.source_text,
-            translation=result.translated_text,
-            status="ok" + ("_cache" if result.from_cache else ""),
-        )
+        try:
+            self.obs.publish(
+                source=result.source_text,
+                translation=result.translated_text,
+                status="ok" + ("_cache" if result.from_cache else ""),
+            )
+        except Exception:
+            pass
 
     def persist(self) -> None:
         g = self.overlay.geometry()

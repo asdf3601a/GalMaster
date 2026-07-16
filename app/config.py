@@ -41,6 +41,20 @@ LANGUAGE_CHOICES: list[tuple[str, str]] = [
 ]
 
 
+PIPELINE_BUFFER_MIN = 1
+PIPELINE_BUFFER_MAX = 16
+PIPELINE_BUFFER_DEFAULT = 3
+
+
+def clamp_pipeline_buffer_size(value: Any) -> int:
+    """Clamp process job queue capacity to 1..16 (default 3)."""
+    try:
+        n = int(value)
+    except (TypeError, ValueError):
+        return PIPELINE_BUFFER_DEFAULT
+    return max(PIPELINE_BUFFER_MIN, min(PIPELINE_BUFFER_MAX, n))
+
+
 def normalize_hex_color(value: Any, default: str) -> str:
     """Normalize to #RRGGBB; invalid values fall back to default."""
     fallback = default if isinstance(default, str) and default.startswith("#") else "#ffffff"
@@ -119,6 +133,11 @@ class AppConfig:
     region_abs_h: int = 0
     bound_hwnd: int = 0
     bound_title: str = ""
+    # Window capture method when bound_hwnd is set (OBS-style):
+    #   auto = WGC → BitBlt/PrintWindow → screen fallback
+    #   wgc  = WGC first, then GDI, then screen
+    #   bitblt = GDI only, then screen
+    window_capture_method: str = "auto"
 
     # Overlay
     overlay_opacity: float = 0.88
@@ -154,6 +173,9 @@ class AppConfig:
     monitor_wait_stable: bool = True
     # Quiet duration (ms) before OCR. 0 = no wait (change triggers immediately).
     monitor_stable_ms: int = 800
+    # Max queued Process jobs while one is running (1 = keep latest only).
+    # Running job is not counted; in-flight ≈ 1 + pipeline_buffer_size.
+    pipeline_buffer_size: int = 3
 
     # OCR engine: "oneocr" | "manga" | "rapid" | "paddle"
     ocr_engine: str = "oneocr"
@@ -239,6 +261,13 @@ class AppConfig:
         cfg.pipeline_mode = mode if mode in ("ocr", "vlm") else "ocr"
         ui_lang = (getattr(cfg, "ui_language", "zh-Hant") or "zh-Hant").strip()
         cfg.ui_language = ui_lang if ui_lang in ("zh-Hant", "en") else "zh-Hant"
+        wcm = (getattr(cfg, "window_capture_method", "auto") or "auto").strip().lower()
+        cfg.window_capture_method = (
+            wcm if wcm in ("auto", "wgc", "bitblt") else "auto"
+        )
+        cfg.pipeline_buffer_size = clamp_pipeline_buffer_size(
+            getattr(cfg, "pipeline_buffer_size", 3)
+        )
         # Coerce optional sampling fields: empty string / bad values → None
         for opt in (
             "temperature",
@@ -268,7 +297,8 @@ class AppConfig:
         if effort is None:
             cfg.reasoning_effort = ""
         else:
-            cfg.reasoning_effort = str(effort).strip().lower()
+            e = str(effort).strip().lower()
+            cfg.reasoning_effort = e if e in ("none", "low", "medium", "high") else ""
         try:
             cfg.obs_port = max(1, min(65535, int(getattr(cfg, "obs_port", 8765) or 8765)))
         except (TypeError, ValueError):
