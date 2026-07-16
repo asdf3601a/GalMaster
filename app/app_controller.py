@@ -22,6 +22,7 @@ from app.i18n import set_language, tr
 from app.obs.server import ObsSubtitleServer
 from app.pipeline import PipelineResult, TranslationPipeline
 from app.pipeline_queue import buffer_cap
+from app.session.capture_stage import CaptureStage
 from app.translate.llm_translator import list_models
 from app.ui.main_window import MainWindow
 from app.ui.overlay_window import OverlayWindow
@@ -43,14 +44,8 @@ class AppController(QObject):
         self.app = app
         self.cfg = load_config()
         set_language(getattr(self.cfg, "ui_language", "zh-Hant") or "zh-Hant")
-        # Capture stage state
-        self._capturing = False
-        self._deferred_auto_captures = 0
-        self._pending_force_recapture = False
-        self._overlay_was_visible = True
-        self._overlay_cloaked = False
-        self._overlay_saved_opacity = 1.0
-        self._pending_force = True
+        # Capture stage: Idle / Capturing + deferred force/auto (see docs/state-machine.md)
+        self.capture_stage = CaptureStage()
         self._models_fetching = False
 
         self.main = MainWindow(self.cfg)
@@ -353,8 +348,7 @@ class AppController(QObject):
             self.cfg.window_capture_method = draft.window_capture_method
             self.pipeline.reset_dedupe()
             self.pipeline.clear_auto_queue()
-            self._deferred_auto_captures = 0
-            self._pending_force_recapture = False
+            self.capture_stage.reset_deferred()
             self.monitor.start(self.cfg)
             running = self.monitor.is_running
             self.cfg.auto_monitor = running
@@ -378,7 +372,7 @@ class AppController(QObject):
         else:
             self.cfg.auto_monitor = False
             self.monitor.stop()
-            self._deferred_auto_captures = 0
+            self.capture_stage.reset_deferred()
             self.main.set_monitor_running(False)
             self.main.sync_operational_monitor(self.cfg)
             try:
@@ -450,54 +444,44 @@ class AppController(QObject):
             return
 
         cap = buffer_cap(getattr(self.cfg, "pipeline_buffer_size", 3))
-
-        # Capture stage busy: defer instead of dropping (bounded).
-        if self._capturing:
-            if force:
-                self._pending_force_recapture = True
-            else:
-                # Remaining room ≈ buffer slots not yet filled by deferred captures
-                room = max(0, cap - self._deferred_auto_captures)
-                if room > 0:
-                    self._deferred_auto_captures += 1
+        action = self.capture_stage.request(force=force, buffer_cap=cap)
+        if action == "deferred":
             return
 
         if force:
-            # Manual path: drop waiting auto backlog so user is not stuck behind it
+            # Manual path: drop waiting auto Process backlog
             self.pipeline.clear_auto_queue()
-            self._deferred_auto_captures = 0
 
         self._start_capture(force=force)
 
     def _start_capture(self, *, force: bool) -> None:
-        """Idle → Capturing (cloak if needed, then async grab)."""
-        self._capturing = True
-        self._pending_force = force
-        self._overlay_was_visible = self.overlay.isVisible()
+        """Begin grab (phase already CAPTURING from request/pump, or set here)."""
+        self.capture_stage.begin_grab(
+            force=force,
+            overlay_was_visible=self.overlay.isVisible(),
+            overlay_opacity=self.overlay.windowOpacity(),
+        )
+        self.main.set_status(tr("pipe.capturing"), busy=True)
         # Cloak only when capture may use *screen* pixels (unbound region / no HWND).
         # Bound-window WGC/GDI does not include our overlay top-level window.
-        self._overlay_cloaked = False
-        self._overlay_saved_opacity = self.overlay.windowOpacity()
-        self.main.set_status(tr("pipe.capturing"), busy=True)
         need_cloak = (
-            self._overlay_was_visible
+            self.capture_stage.overlay_was_visible
             and self._capture_may_use_screen()
             and self._overlay_may_cover_region()
         )
         if need_cloak:
             self.overlay.setWindowOpacity(0.0)
-            self._overlay_cloaked = True
+            self.capture_stage.mark_cloaked()
             QTimer.singleShot(40, self._capture_and_enqueue)
         else:
             QTimer.singleShot(0, self._capture_and_enqueue)
 
     def _restore_overlay_after_capture(self) -> None:
         """Undo temporary opacity cloak used during capture."""
-        if getattr(self, "_overlay_cloaked", False):
-            saved = float(getattr(self, "_overlay_saved_opacity", 1.0) or 1.0)
-            self.overlay.setWindowOpacity(max(0.3, min(1.0, saved)))
-            self._overlay_cloaked = False
-        if self._overlay_was_visible and not self.overlay.isVisible():
+        saved = self.capture_stage.take_cloak_restore()
+        if saved is not None:
+            self.overlay.setWindowOpacity(saved)
+        if self.capture_stage.overlay_was_visible and not self.overlay.isVisible():
             self.overlay.show()
 
     def _capture_may_use_screen(self) -> bool:
@@ -572,9 +556,7 @@ class AppController(QObject):
         threading.Thread(target=_work, name="galmaster-capture", daemon=True).start()
 
     def _on_capture_finished(self, img: object, err: object) -> None:
-        force = self._pending_force
-        was_visible = self._overlay_was_visible
-        self._capturing = False
+        force, was_visible = self.capture_stage.finish()
         self._restore_overlay_after_capture()
         if err is not None:
             # Status only — keep last overlay / result text (same as empty-OCR soft path)
@@ -600,16 +582,11 @@ class AppController(QObject):
 
     def _capture_pump_deferred(self) -> None:
         """After a capture ends, start force recapture or deferred auto grabs."""
-        if self._capturing:
-            return
-        if self._pending_force_recapture:
-            self._pending_force_recapture = False
-            self._deferred_auto_captures = 0
+        nxt = self.capture_stage.pump()
+        if nxt == "force":
             self.pipeline.clear_auto_queue()
             self._start_capture(force=True)
-            return
-        if self._deferred_auto_captures > 0:
-            self._deferred_auto_captures -= 1
+        elif nxt == "auto":
             self._start_capture(force=False)
 
     def on_preview_ready(self, img: object) -> None:
@@ -763,7 +740,7 @@ class AppController(QObject):
             return
 
         # Show results on overlay when it is open, or was open when capture started
-        if self._overlay_was_visible or self.overlay.isVisible():
+        if self.capture_stage.overlay_was_visible or self.overlay.isVisible():
             if not self.overlay.isVisible():
                 self.overlay.show()
 

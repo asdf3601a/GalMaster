@@ -132,16 +132,23 @@ temperature / top_p / top_k / frequency_penalty / presence_penalty / reasoning_e
 app/
   main.py              # 進入點
   app_controller.py    # 串起 UI / 熱鍵 / 管線
+  session/             # Capture 階段狀態（Idle / Capturing）
   config.py
-  pipeline.py          # 截圖 → OCR|VLM → LLM
-  capture/             # 視窗、截圖、監控
+  pipeline.py          # OCR|VLM → LLM（Process；影像由 Capture 提供）
+  pipeline_queue.py    # Process 有界 FIFO
+  capture/             # 視窗、截圖、監控（Detect）
   ocr/                 # OneOCR / Manga / Rapid / Paddle
   translate/           # LLM + 快取 + sampling
   obs/                 # Browser Source 字幕伺服器
   i18n/                # en / zh-Hant
   ui/                  # 主視窗、Overlay、框選
   hotkeys/             # 全域熱鍵
+docs/
+  architecture.md      # 模組邊界與管線
+  state-machine.md     # 狀態與事件
 ```
+
+執行緒模型（摘要）：**Detect**（監控 daemon）→ **Capture**（單次截圖 daemon）→ **Process**（單一 QThread worker + 有界佇列）→ **Present**（UI 執行緒）。詳見 [docs/architecture.md](docs/architecture.md)。
 
 ## 授權
 
