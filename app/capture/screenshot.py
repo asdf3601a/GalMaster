@@ -161,6 +161,10 @@ def capture_hwnd_client(hwnd: int) -> Image.Image | None:
     except ImportError:
         return None
 
+    hwnd_dc = None
+    mfc_dc = None
+    save_dc = None
+    bitmap = None
     try:
         left, top, right, bottom = win32gui.GetClientRect(hwnd)
         w, h = right - left, bottom - top
@@ -190,14 +194,30 @@ def capture_hwnd_client(hwnd: int) -> Image.Image | None:
             0,
             1,
         ).copy()
-
-        win32gui.DeleteObject(bitmap.GetHandle())
-        save_dc.DeleteDC()
-        mfc_dc.DeleteDC()
-        win32gui.ReleaseDC(hwnd, hwnd_dc)
         return img
     except Exception:
         return None
+    finally:
+        try:
+            if bitmap is not None:
+                win32gui.DeleteObject(bitmap.GetHandle())
+        except Exception:
+            pass
+        try:
+            if save_dc is not None:
+                save_dc.DeleteDC()
+        except Exception:
+            pass
+        try:
+            if mfc_dc is not None:
+                mfc_dc.DeleteDC()
+        except Exception:
+            pass
+        try:
+            if hwnd_dc is not None:
+                win32gui.ReleaseDC(hwnd, hwnd_dc)
+        except Exception:
+            pass
 
 
 def capture_region(
@@ -208,15 +228,21 @@ def capture_region(
     rel_w: int,
     rel_h: int,
     prefer_screen: bool = True,
+    abs_x: int = 0,
+    abs_y: int = 0,
+    abs_w: int = 0,
+    abs_h: int = 0,
 ) -> Image.Image:
     """
     Capture OCR region.
 
     Prefer **screen capture via mss** (works from any thread; reliable for games).
     When hwnd is valid, region is relative to client area and converted to screen.
-    Optional HWND PrintWindow path only when screen grab looks blank / disabled.
+    When hwnd is stale, fall back to last-known absolute screen rect if provided.
     """
     if rel_w <= 0 or rel_h <= 0:
+        if abs_w > 0 and abs_h > 0:
+            return capture_screen_region(abs_x, abs_y, abs_w, abs_h)
         raise ValueError("尚未框選 OCR 區域或尺寸無效")
 
     screen_img: Image.Image | None = None
@@ -259,9 +285,12 @@ def capture_region(
             left, top, w, h = client_to_screen_rect(hwnd, rel_x, rel_y, rel_w, rel_h)
             return capture_screen_region(left, top, w, h)
 
-        # HWND invalid/stale: cannot convert client→screen safely
+        # HWND invalid/stale: use last absolute screen rect if known
+        if abs_w > 0 and abs_h > 0:
+            return capture_screen_region(int(abs_x), int(abs_y), int(abs_w), int(abs_h))
         raise ValueError(
-            "綁定視窗已失效（HWND 無效）。請重新整理視窗列表並再框選 OCR 區域。"
+            "綁定視窗已失效（HWND 無效），且沒有可用的螢幕座標快取。"
+            "請重新整理視窗列表並再框選 OCR 區域。"
         )
 
     # Absolute screen region (no binding)
@@ -269,8 +298,8 @@ def capture_region(
 
 
 def capture_from_config(cfg: AppConfig) -> Image.Image:
-    """Capture using AppConfig region / bound hwnd."""
-    if not cfg.has_region:
+    """Capture using AppConfig region / bound hwnd / last absolute screen rect."""
+    if not cfg.has_region and not getattr(cfg, "has_abs_region", False):
         raise ValueError("尚未框選 OCR 區域")
     return capture_region(
         hwnd=cfg.bound_hwnd or None,
@@ -278,6 +307,10 @@ def capture_from_config(cfg: AppConfig) -> Image.Image:
         rel_y=cfg.region_y,
         rel_w=cfg.region_w,
         rel_h=cfg.region_h,
+        abs_x=int(getattr(cfg, "region_abs_x", 0) or 0),
+        abs_y=int(getattr(cfg, "region_abs_y", 0) or 0),
+        abs_w=int(getattr(cfg, "region_abs_w", 0) or 0),
+        abs_h=int(getattr(cfg, "region_abs_h", 0) or 0),
     )
 
 

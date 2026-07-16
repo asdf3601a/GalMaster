@@ -44,10 +44,39 @@ def test_monitor_stable_ms_default():
     assert c.monitor_stable_ms == 1500
 
 
+def test_ocr_engine_default_oneocr():
+    assert AppConfig().ocr_engine == "oneocr"
+
+
+def test_from_dict_normalizes_legacy_ocr_and_stable():
+    c = AppConfig.from_dict({"ocr_engine": "auto", "monitor_wait_stable": False, "monitor_stable_ms": 800})
+    assert c.ocr_engine == "oneocr"
+    assert c.monitor_stable_ms == 0
+    assert c.monitor_wait_stable is False
+
+    c2 = AppConfig.from_dict({"ocr_engine": "manga", "monitor_stable_ms": 1200})
+    assert c2.ocr_engine == "manga"
+    assert c2.monitor_stable_ms == 1200
+    assert c2.monitor_wait_stable is True
+
+
 def test_context_history_size_default():
     assert AppConfig().context_history_size == 3
     c = AppConfig(context_history_size=5)
     assert c.context_history_size == 5
+
+
+def test_abs_region():
+    c = AppConfig()
+    assert not c.has_abs_region
+    c.set_abs_region(10, 20, 300, 40)
+    assert c.has_abs_region
+    assert (c.region_abs_x, c.region_abs_y, c.region_abs_w, c.region_abs_h) == (
+        10,
+        20,
+        300,
+        40,
+    )
 
 
 def test_default_config_path_is_project_dir():

@@ -9,6 +9,14 @@ We load the user's already-installed ScreenSketch files (not redistributed):
   oneocr.dll, oneocr.onemodel, onnxruntime.dll
 
 This bypasses Windows App SDK package-identity restrictions on TextRecognizer.
+
+Note: CreateOcrPipeline only accepts the bare model name with CWD set to the
+dll directory (absolute paths return success but produce garbage OCR). Keep
+process CWD / SetDllDirectory aligned with tools/oneocr for the engine lifetime.
+
+HARD PROCESS INVARIANT: after OneOCR init, the process CWD remains tools/oneocr
+for the engine lifetime (also re-asserted under lock on each recognize). Any
+relative-path I/O elsewhere in the app must use project_root() / absolute paths.
 """
 
 from __future__ import annotations
@@ -89,7 +97,6 @@ def find_screensketch_oneocr_dir() -> Path | None:
     except Exception:
         pass
 
-    # Fallback: scan WindowsApps (may need permissions)
     wa = Path(r"C:\Program Files\WindowsApps")
     try:
         for d in sorted(wa.glob("Microsoft.ScreenSketch*"), reverse=True):
@@ -150,6 +157,47 @@ def _rgba_to_bgra_contiguous(image: Image.Image) -> np.ndarray:
     return np.ascontiguousarray(bgra)
 
 
+def _pick_best_text(candidates: list[str]) -> str:
+    """
+    Prefer meaningful text over pure length.
+    Length alone can keep short garbage; hybrid-style score helps JP/EN dialog.
+    Inline score to avoid importing hybrid (and its heavy deps).
+    """
+    import re
+
+    garbage_re = re.compile(r"^[\s□■▪▫○●◦‧·\.\-_=~`|\\/\-Xx]+$")
+    fullwidth_re = re.compile(r"[\uff01-\uff5e]")
+
+    best = ""
+    best_score = -1.0
+    for text in candidates:
+        s = (text or "").strip()
+        if not s or garbage_re.match(s.replace("\n", "")):
+            continue
+        compact = s.replace("\n", "").replace(" ", "")
+        if not compact:
+            continue
+        cjk = sum(
+            1
+            for ch in compact
+            if "\u3040" <= ch <= "\u30ff" or "\u4e00" <= ch <= "\u9fff"
+        )
+        alnum = sum(1 for ch in compact if ch.isalnum())
+        fullw = len(fullwidth_re.findall(compact))
+        # Length + CJK/alnum bonus; penalize fullwidth latin noise
+        score = float(len(compact) + 2 * cjk + alnum - 1.5 * fullw)
+        # Prefer longer when scores are close (stable vs pure score thrashing)
+        if score > best_score or (
+            abs(score - best_score) < 0.01 and len(s) > len(best)
+        ):
+            best_score = score
+            best = s
+    if best:
+        return best
+    # Fallback: longest non-empty (old behavior)
+    return max(candidates, key=lambda t: len((t or "").strip()), default="") or ""
+
+
 class OneOCREngine:
     """Windows 11 Snipping Tool offline OCR (oneocr.dll)."""
 
@@ -162,14 +210,21 @@ class OneOCREngine:
         self._ctx = c_int64(0)
         self._pipeline = c_int64(0)
         self._opt = c_int64(0)
+        self._prev_cwd = os.getcwd()
+        self._dll_dir_set = False
         self._init_api()
 
     def _init_api(self) -> None:
-        # DLL search path + model relative path
+        # oneocr + onnxruntime must resolve from this directory (see probe_oneocr.py)
         os.add_dll_directory(str(self._dir))
-        ctypes.WinDLL("kernel32").SetDllDirectoryW(str(self._dir))
+        kernel32 = ctypes.WinDLL("kernel32")
+        self._set_dll_dir = getattr(kernel32, "SetDllDirectoryW", None)
+        if self._set_dll_dir is not None:
+            self._set_dll_dir(str(self._dir))
+            self._dll_dir_set = True
 
-        # Keep previous CWD for model path "oneocr.onemodel"
+        # Relative model name "oneocr.onemodel" requires CWD == dll dir.
+        # Absolute paths can return success from CreateOcrPipeline but OCR garbage.
         self._prev_cwd = os.getcwd()
         os.chdir(self._dir)
 
@@ -211,7 +266,6 @@ class OneOCREngine:
         self._GetOcrLineContent = bind(
             "GetOcrLineContent", [c_int64, POINTER(c_int64)]
         )
-        # Optional cleanup
         self._ReleaseOcrResult = bind("ReleaseOcrResult", [c_int64])
         self._ReleaseOcrProcessOptions = bind(
             "ReleaseOcrProcessOptions", [c_int64]
@@ -249,13 +303,13 @@ class OneOCREngine:
         return "OneOCR（剪取工具離線模型）"
 
     def recognize(self, image: Image.Image) -> str:
-        best = ""
+        candidates: list[str] = []
         for force_invert in (None, False, True):
             prepared = preprocess_for_ocr(image, force_invert=force_invert)
             text = self._recognize_once(prepared)
-            if len(text) > len(best):
-                best = text
-        return best
+            if text:
+                candidates.append(text)
+        return _pick_best_text(candidates)
 
     def _recognize_once(self, image: Image.Image) -> str:
         buf = _rgba_to_bgra_contiguous(image)
@@ -269,6 +323,18 @@ class OneOCREngine:
             int(buf.ctypes.data),
         )
         with self._lock:
+            # Ensure native deps still resolve if something else changed DLL dir
+            if self._set_dll_dir is not None:
+                try:
+                    self._set_dll_dir(str(self._dir))
+                except Exception:
+                    pass
+            try:
+                if os.getcwd() != str(self._dir):
+                    os.chdir(self._dir)
+            except Exception:
+                pass
+
             instance = c_int64(0)
             res = self._RunOcrPipeline(
                 self._pipeline, byref(ig), self._opt, byref(instance)
@@ -321,9 +387,16 @@ class OneOCREngine:
             self._pipeline = c_int64(0)
             self._ctx = c_int64(0)
             try:
-                os.chdir(self._prev_cwd)
+                if self._prev_cwd:
+                    os.chdir(self._prev_cwd)
             except Exception:
                 pass
+            if self._dll_dir_set and self._set_dll_dir is not None:
+                try:
+                    self._set_dll_dir(None)
+                except Exception:
+                    pass
+                self._dll_dir_set = False
 
     def __del__(self) -> None:
         try:

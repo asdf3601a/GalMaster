@@ -26,6 +26,7 @@ from PySide6.QtWidgets import (
 
 from app.capture.windows import WindowInfo
 from app.config import LANGUAGE_CHOICES, AppConfig
+from app.ocr.base import DEFAULT_OCR_ENGINE, normalize_ocr_engine
 from app.translate.providers import PROVIDER_PRESETS, get_preset
 from app.ui.styles import MAIN_STYLE
 from app.ui.widgets import NoWheelComboBox, NoWheelDoubleSpinBox, NoWheelSpinBox
@@ -55,41 +56,105 @@ class MainWindow(QMainWindow):
         self._applying_preset = False
         self._loading_ui = False
         self._dirty = False
+        self._monitor_running = bool(cfg.auto_monitor)
+
+        central = QWidget()
+        outer = QVBoxLayout(central)
+        outer.setSpacing(8)
+        outer.setContentsMargins(10, 10, 10, 10)
+
+        outer.addWidget(self._build_top_bar())
 
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.Shape.NoFrame)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-        # Let wheel always scroll the page when over non-focus widgets
         scroll.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
 
         body = QWidget()
         root = QVBoxLayout(body)
         root.setSpacing(8)
-        root.setContentsMargins(10, 10, 10, 10)
-
-        self.work_status = QLabel("就緒 — 框選區域後按熱鍵翻譯")
-        self.work_status.setObjectName("workStatus")
-        self.work_status.setWordWrap(True)
-        self.work_status.setProperty("busy", "false")
-        root.addWidget(self.work_status)
+        root.setContentsMargins(0, 0, 0, 0)
 
         root.addWidget(self._build_capture_group(cfg))
         root.addWidget(self._build_lang_group(cfg))
         root.addWidget(self._build_llm_group(cfg))
         root.addWidget(self._build_display_group(cfg))
-        root.addWidget(self._build_settings_actions())
         root.addWidget(self._build_result_group())
         root.addWidget(self._build_footer())
         root.addStretch(0)
 
         scroll.setWidget(body)
-        self.setCentralWidget(scroll)
+        outer.addWidget(scroll, 1)
+        self.setCentralWidget(central)
 
         self.statusBar().showMessage("就緒 — 框選區域後按熱鍵翻譯")
         self._apply_window_geometry(cfg)
+        self._set_monitor_buttons(self._monitor_running)
         self._set_dirty(False)
+
+    # ------------------------------------------------------------------ top bar
+
+    def _build_top_bar(self) -> QWidget:
+        wrap = QWidget()
+        wrap.setObjectName("topBar")
+        col = QVBoxLayout(wrap)
+        col.setContentsMargins(0, 0, 0, 4)
+        col.setSpacing(6)
+
+        self.work_status = QLabel("就緒 — 框選區域後按熱鍵翻譯")
+        self.work_status.setObjectName("workStatus")
+        self.work_status.setWordWrap(True)
+        self.work_status.setProperty("busy", "false")
+        col.addWidget(self.work_status)
+
+        row = QHBoxLayout()
+        row.setSpacing(6)
+
+        self.btn_start_monitor = QPushButton("開始監控")
+        self.btn_start_monitor.setToolTip("開始自動監控（畫面變化時翻譯）")
+        self.btn_start_monitor.clicked.connect(lambda: self.auto_monitor_toggled.emit(True))
+
+        self.btn_stop_monitor = QPushButton("停止監控")
+        self.btn_stop_monitor.setObjectName("secondary")
+        self.btn_stop_monitor.setToolTip("停止自動監控")
+        self.btn_stop_monitor.clicked.connect(lambda: self.auto_monitor_toggled.emit(False))
+
+        self.settings_hint = QLabel("修改後請套用或儲存")
+        self.settings_hint.setObjectName("hint")
+
+        self.btn_apply = QPushButton("套用")
+        self.btn_apply.setObjectName("secondary")
+        self.btn_apply.setToolTip("套用到執行中程式（不寫入檔案）")
+        self.btn_apply.clicked.connect(self.apply_settings_clicked.emit)
+
+        self.btn_save = QPushButton("儲存")
+        self.btn_save.setToolTip("套用並寫入 config.json")
+        self.btn_save.clicked.connect(self.save_settings_clicked.emit)
+
+        self.btn_cancel = QPushButton("取消")
+        self.btn_cancel.setObjectName("secondary")
+        self.btn_cancel.setToolTip("還原為上次套用／儲存的設定")
+        self.btn_cancel.clicked.connect(self.cancel_settings_clicked.emit)
+
+        row.addWidget(self.btn_start_monitor)
+        row.addWidget(self.btn_stop_monitor)
+        row.addWidget(self.settings_hint, 1)
+        row.addWidget(self.btn_apply)
+        row.addWidget(self.btn_save)
+        row.addWidget(self.btn_cancel)
+        col.addLayout(row)
+        return wrap
+
+    def _set_monitor_buttons(self, running: bool) -> None:
+        self._monitor_running = running
+        self.btn_start_monitor.setEnabled(not running)
+        self.btn_stop_monitor.setEnabled(running)
+
+    def set_monitor_running(self, running: bool) -> None:
+        """Sync Start/Stop button enable state with RegionMonitor."""
+        self._set_monitor_buttons(bool(running))
 
     # ------------------------------------------------------------------ builders
 
@@ -126,59 +191,56 @@ class MainWindow(QMainWindow):
         self._update_region_label()
         cap_l.addWidget(self.region_label)
 
-        self.auto_check = QCheckBox("自動監控（畫面變化時翻譯）")
-        self.auto_check.setChecked(cfg.auto_monitor)
-        self.auto_check.toggled.connect(self._on_auto_toggled)
-        cap_l.addWidget(self.auto_check)
+        mon = QFormLayout()
+        mon.setSpacing(6)
+        mon.setLabelAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        mon.setFormAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
+        mon.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.FieldsStayAtSizeHint)
 
-        self.stable_check = QCheckBox("僅在畫面穩定後才開始辨識")
-        self.stable_check.setChecked(getattr(cfg, "monitor_wait_stable", True))
-        self.stable_check.setToolTip(
-            "開啟：變化後等待畫面安靜一段時間再 OCR（適合台詞淡入）。\n"
-            "關閉：一偵測到變化就立即 OCR。"
-        )
-        self.stable_check.toggled.connect(self._on_stable_toggled)
-        cap_l.addWidget(self.stable_check)
-
-        mon_row = QHBoxLayout()
-        mon_row.addWidget(QLabel("間隔"))
-        self.interval_spin = NoWheelSpinBox()
-        self.interval_spin.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
-        self.interval_spin.setRange(200, 5000)
-        self.interval_spin.setSuffix(" ms")
-        self.interval_spin.setValue(cfg.monitor_interval_ms)
-        self.interval_spin.valueChanged.connect(self._mark_dirty)
-        mon_row.addWidget(self.interval_spin)
-        mon_row.addWidget(QLabel("變化閾值"))
-        self.threshold_spin = NoWheelDoubleSpinBox()
-        self.threshold_spin.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
-        self.threshold_spin.setRange(0.005, 0.5)
-        self.threshold_spin.setSingleStep(0.005)
-        self.threshold_spin.setDecimals(3)
-        self.threshold_spin.setValue(cfg.monitor_diff_threshold)
-        self.threshold_spin.setToolTip("畫面差異超過此值視為「有變化」")
-        self.threshold_spin.valueChanged.connect(self._mark_dirty)
-        mon_row.addWidget(self.threshold_spin)
-        mon_row.addStretch(1)
-        cap_l.addLayout(mon_row)
-
-        stable_row = QHBoxLayout()
-        stable_row.addWidget(QLabel("穩定時間"))
         self.stable_ms_spin = NoWheelSpinBox()
         self.stable_ms_spin.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
-        self.stable_ms_spin.setRange(100, 10000)
+        self.stable_ms_spin.setRange(0, 10000)
         self.stable_ms_spin.setSingleStep(100)
         self.stable_ms_spin.setSuffix(" ms")
-        self.stable_ms_spin.setValue(int(getattr(cfg, "monitor_stable_ms", 800) or 800))
+        stable_ms = int(getattr(cfg, "monitor_stable_ms", 800) or 0)
+        if not getattr(cfg, "monitor_wait_stable", True):
+            stable_ms = 0
+        self.stable_ms_spin.setValue(max(0, stable_ms))
         self.stable_ms_spin.setToolTip(
             "畫面安靜（低於變化閾值）持續多久後才開始 OCR。\n"
+            "0 = 偵測到變化立即 OCR（不等待穩定）。\n"
             "台詞淡入較慢可調高（例如 1000–2000 ms）。"
         )
         self.stable_ms_spin.valueChanged.connect(self._mark_dirty)
-        self.stable_ms_spin.setEnabled(self.stable_check.isChecked())
-        stable_row.addWidget(self.stable_ms_spin)
-        stable_row.addStretch(1)
-        cap_l.addLayout(stable_row)
+        mon.addRow("穩定時間", self.stable_ms_spin)
+
+        self.interval_spin = NoWheelSpinBox()
+        self.interval_spin.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.interval_spin.setRange(0, 5000)
+        self.interval_spin.setSingleStep(50)
+        self.interval_spin.setSuffix(" ms")
+        self.interval_spin.setValue(int(cfg.monitor_interval_ms or 0))
+        self.interval_spin.setToolTip(
+            "輪詢畫面的間隔。\n"
+            "0 = 使用預設 600 ms；實際下限約 200 ms。"
+        )
+        self.interval_spin.valueChanged.connect(self._mark_dirty)
+        mon.addRow("間隔", self.interval_spin)
+
+        self.threshold_spin = NoWheelDoubleSpinBox()
+        self.threshold_spin.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.threshold_spin.setRange(0.0, 0.5)
+        self.threshold_spin.setSingleStep(0.005)
+        self.threshold_spin.setDecimals(3)
+        self.threshold_spin.setValue(float(cfg.monitor_diff_threshold))
+        self.threshold_spin.setToolTip(
+            "畫面差異超過此值視為「有變化」。\n"
+            "0 = 極敏感（使用最小門檻，僅在有實際像素差異時觸發）。"
+        )
+        self.threshold_spin.valueChanged.connect(self._mark_dirty)
+        mon.addRow("變化閾值", self.threshold_spin)
+
+        cap_l.addLayout(mon)
 
         self.window_combo.currentIndexChanged.connect(self._on_window_selected)
         return cap
@@ -274,22 +336,20 @@ class MainWindow(QMainWindow):
 
         self.ocr_combo = NoWheelComboBox()
         self.ocr_combo.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
-        self.ocr_combo.addItem("自動（日文推薦）", "auto")
-        self.ocr_combo.addItem("manga-ocr", "manga")
-        self.ocr_combo.addItem("Windows OCR（OneOCR→AI→經典）", "windows")
         self.ocr_combo.addItem("OneOCR（剪取工具離線模型）", "oneocr")
-        self.ocr_combo.addItem("Windows AI API only", "windows_ai")
-        self.ocr_combo.addItem("Windows 經典 Media.Ocr", "windows_classic")
-        self.ocr_combo.addItem("PaddleOCR / PP-OCR", "paddle")
+        self.ocr_combo.addItem("Manga OCR", "manga")
         self.ocr_combo.addItem("RapidOCR", "rapid")
-        self._set_combo(self.ocr_combo, cfg.ocr_engine or "auto")
+        self.ocr_combo.addItem("PaddleOCR", "paddle")
+        self._set_combo(
+            self.ocr_combo, normalize_ocr_engine(cfg.ocr_engine or DEFAULT_OCR_ENGINE)
+        )
         self.ocr_combo.setToolTip(
-            "Windows OCR：\n"
-            "• OneOCR：直接呼叫剪取工具 oneocr.dll 離線模型（推薦，中日英都強）。\n"
-            "• Windows AI API：WASDK TextRecognizer（未封裝程式可能 Access Denied）。\n"
-            "• 經典 Media.Ocr：PowerToys 文字擷取器那套。\n"
-            "預設「Windows OCR」會依序嘗試 OneOCR → AI → 經典。\n"
-            "首次使用 OneOCR 會從已安裝的剪取工具複製模型到 tools/oneocr（約 100MB）。"
+            "OCR 引擎：\n"
+            "• OneOCR：剪取工具 oneocr.dll 離線模型（推薦，中日英）。\n"
+            "• Manga OCR：日文對白／遊戲字體友善。\n"
+            "• RapidOCR：ONNX 輕量多語。\n"
+            "• PaddleOCR：PP-OCR（較重，可選安裝）。\n"
+            "首次 OneOCR 會從已安裝的剪取工具複製模型到 tools/oneocr。"
         )
         self.ocr_combo.currentIndexChanged.connect(self._mark_dirty)
 
@@ -344,37 +404,15 @@ class MainWindow(QMainWindow):
         self.btn_overlay.clicked.connect(self.toggle_overlay_clicked.emit)
         self.btn_cache = QPushButton("清除快取")
         self.btn_cache.setObjectName("secondary")
+        self.btn_cache.setToolTip(
+            "清除翻譯快取與對話上下文歷史。\n"
+            "快取會依原文＋上下文窗口產生金鑰；清除後下次會重新呼叫 LLM。"
+        )
         self.btn_cache.clicked.connect(self.clear_cache_clicked.emit)
         row_btn.addWidget(self.btn_overlay)
         row_btn.addWidget(self.btn_cache)
         form.addRow(row_btn)
         return ov
-
-    def _build_settings_actions(self) -> QGroupBox:
-        box = QGroupBox("設定")
-        row = QHBoxLayout(box)
-        self.settings_hint = QLabel("修改後請套用或儲存")
-        self.settings_hint.setObjectName("hint")
-        row.addWidget(self.settings_hint, 1)
-
-        self.btn_apply = QPushButton("套用")
-        self.btn_apply.setObjectName("secondary")
-        self.btn_apply.setToolTip("套用到執行中程式（不寫入檔案）")
-        self.btn_apply.clicked.connect(self.apply_settings_clicked.emit)
-
-        self.btn_save = QPushButton("儲存")
-        self.btn_save.setToolTip("套用並寫入 config.json")
-        self.btn_save.clicked.connect(self.save_settings_clicked.emit)
-
-        self.btn_cancel = QPushButton("取消")
-        self.btn_cancel.setObjectName("secondary")
-        self.btn_cancel.setToolTip("還原為上次套用／儲存的設定")
-        self.btn_cancel.clicked.connect(self.cancel_settings_clicked.emit)
-
-        row.addWidget(self.btn_apply)
-        row.addWidget(self.btn_save)
-        row.addWidget(self.btn_cancel)
-        return box
 
     def _build_result_group(self) -> QGroupBox:
         res = QGroupBox("最近結果")
@@ -431,6 +469,8 @@ class MainWindow(QMainWindow):
         idx = combo.findData(data)
         if idx >= 0:
             combo.setCurrentIndex(idx)
+        elif combo.count() > 0:
+            combo.setCurrentIndex(0)
 
     def _update_region_label(self) -> None:
         c = self._cfg
@@ -467,15 +507,16 @@ class MainWindow(QMainWindow):
             self.opacity_spin.setValue(cfg.overlay_opacity)
             self.font_spin.setValue(cfg.overlay_font_size)
             self.click_through_check.setChecked(cfg.overlay_click_through)
-            self._set_combo(self.ocr_combo, cfg.ocr_engine or "paddle")
-            self.auto_check.blockSignals(True)
-            self.auto_check.setChecked(cfg.auto_monitor)
-            self.auto_check.blockSignals(False)
-            self.stable_check.setChecked(getattr(cfg, "monitor_wait_stable", True))
-            self.stable_ms_spin.setValue(int(getattr(cfg, "monitor_stable_ms", 800) or 800))
-            self.stable_ms_spin.setEnabled(self.stable_check.isChecked())
-            self.interval_spin.setValue(cfg.monitor_interval_ms)
-            self.threshold_spin.setValue(cfg.monitor_diff_threshold)
+            self._set_combo(
+                self.ocr_combo,
+                normalize_ocr_engine(cfg.ocr_engine or DEFAULT_OCR_ENGINE),
+            )
+            stable_ms = int(getattr(cfg, "monitor_stable_ms", 800) or 0)
+            if not getattr(cfg, "monitor_wait_stable", True):
+                stable_ms = 0
+            self.stable_ms_spin.setValue(max(0, stable_ms))
+            self.interval_spin.setValue(int(cfg.monitor_interval_ms or 0))
+            self.threshold_spin.setValue(float(cfg.monitor_diff_threshold))
         finally:
             self._loading_ui = False
         self._set_dirty(False)
@@ -500,10 +541,12 @@ class MainWindow(QMainWindow):
         c.overlay_opacity = float(self.opacity_spin.value())
         c.overlay_font_size = int(self.font_spin.value())
         c.overlay_click_through = self.click_through_check.isChecked()
-        c.ocr_engine = self.ocr_combo.currentData() or "auto"
-        c.auto_monitor = self.auto_check.isChecked()
-        c.monitor_wait_stable = self.stable_check.isChecked()
+        c.ocr_engine = normalize_ocr_engine(
+            self.ocr_combo.currentData() or DEFAULT_OCR_ENGINE
+        )
+        c.auto_monitor = bool(self._monitor_running)
         c.monitor_stable_ms = int(self.stable_ms_spin.value())
+        c.monitor_wait_stable = c.monitor_stable_ms > 0
         c.monitor_interval_ms = int(self.interval_spin.value())
         c.monitor_diff_threshold = float(self.threshold_spin.value())
         geo = self.geometry()
@@ -586,9 +629,17 @@ class MainWindow(QMainWindow):
         self._cfg.region_y = cfg.region_y
         self._cfg.region_w = cfg.region_w
         self._cfg.region_h = cfg.region_h
+        self._cfg.region_abs_x = int(getattr(cfg, "region_abs_x", 0) or 0)
+        self._cfg.region_abs_y = int(getattr(cfg, "region_abs_y", 0) or 0)
+        self._cfg.region_abs_w = int(getattr(cfg, "region_abs_w", 0) or 0)
+        self._cfg.region_abs_h = int(getattr(cfg, "region_abs_h", 0) or 0)
         self._cfg.bound_hwnd = cfg.bound_hwnd
         self._cfg.bound_title = cfg.bound_title
         self._update_region_label()
+
+    def mark_runtime_dirty(self) -> None:
+        """Mark form dirty after operational changes that should be Saved (e.g. monitor)."""
+        self._set_dirty(True)
 
     def set_result_text(self, text: str) -> None:
         self.result_view.setPlainText(text)
@@ -630,16 +681,6 @@ class MainWindow(QMainWindow):
         if hwnd == 0:
             title = ""
         self.bind_window_changed.emit(hwnd, title)
-
-    def _on_auto_toggled(self, checked: bool) -> None:
-        # Auto monitor is immediate so user can start/stop without Apply
-        self.auto_monitor_toggled.emit(checked)
-        # still mark dirty so Save persists the choice
-        self._mark_dirty()
-
-    def _on_stable_toggled(self, checked: bool) -> None:
-        self.stable_ms_spin.setEnabled(checked)
-        self._mark_dirty()
 
     def show_error(self, title: str, message: str) -> None:
         QMessageBox.warning(self, title, message)

@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 from collections import deque
+from copy import deepcopy
 from dataclasses import dataclass
+from hashlib import sha1
 
 from PIL import Image
 from PySide6.QtCore import QObject, Qt, QThread, Signal
@@ -51,6 +53,13 @@ class _Worker(QObject):
         self._last_source = ""
         # Sliding window of (source, translation) for LLM context
         self._history: deque[tuple[str, str]] = deque(maxlen=32)
+        self._abort = False
+
+    def request_abort(self) -> None:
+        self._abort = True
+
+    def clear_abort(self) -> None:
+        self._abort = False
 
     def run_job(self, job: object) -> None:
         if isinstance(job, PipelineJob):
@@ -58,13 +67,22 @@ class _Worker(QObject):
             img = job.image
             force = job.force
         else:
-            # Backward-compatible: (cfg, image) via old path shouldn't happen
             self.finished.emit(PipelineResult("", "", error="內部錯誤：無效的工作項目"))
             return
 
+        # Honour abort set before this job started (e.g. shutdown).
+        # After a successful pass through this check, clear sticky abort so the
+        # next intentional job is not skipped after a prior cancel.
+        if self._abort:
+            self.finished.emit(
+                PipelineResult("", "", skipped=True, status_message="已取消")
+            )
+            return
+        self.clear_abort()
+
         try:
             if img is None:
-                if not cfg.has_region:
+                if not cfg.has_region and not getattr(cfg, "has_abs_region", False):
                     self.finished.emit(PipelineResult("", "", error="尚未框選 OCR 區域"))
                     return
                 self.progress.emit("截圖中…")
@@ -74,7 +92,17 @@ class _Worker(QObject):
                     rel_y=cfg.region_y,
                     rel_w=cfg.region_w,
                     rel_h=cfg.region_h,
+                    abs_x=int(getattr(cfg, "region_abs_x", 0) or 0),
+                    abs_y=int(getattr(cfg, "region_abs_y", 0) or 0),
+                    abs_w=int(getattr(cfg, "region_abs_w", 0) or 0),
+                    abs_h=int(getattr(cfg, "region_abs_h", 0) or 0),
                 )
+
+            if self._abort:
+                self.finished.emit(
+                    PipelineResult("", "", skipped=True, status_message="已取消")
+                )
+                return
 
             self.progress.emit(f"準備影像…（{describe_image(img)}）")
             debug_path = save_last_capture(img)
@@ -96,6 +124,11 @@ class _Worker(QObject):
             backend = getattr(ocr, "backend_label", None) or cfg.ocr_engine
             self.progress.emit(f"OCR 辨識中（{backend}）…")
             source = ocr.recognize(img).strip()
+            if self._abort:
+                self.finished.emit(
+                    PipelineResult("", "", skipped=True, status_message="已取消")
+                )
+                return
             if not source:
                 self.finished.emit(
                     PipelineResult(
@@ -105,7 +138,7 @@ class _Worker(QObject):
                             "OCR 未辨識到文字。"
                             f"截圖 {describe_image(img)}\n"
                             f"已存：{debug_path}\n"
-                            "請確認截圖裡有字；日文建議 OCR=自動/manga-ocr，並重新框選對話框。"
+                            "請確認截圖裡有字；日文可試 OneOCR 或 Manga OCR，並重新框選對話框。"
                         ),
                     )
                 )
@@ -129,22 +162,26 @@ class _Worker(QObject):
 
             if not cfg.has_llm:
                 self.progress.emit("OCR 完成（未設定 LLM）")
-                # Still record source in history so later LLM turns have dialogue context
                 self._push_history(source, "")
                 self.finished.emit(PipelineResult(source, "", ocr_only=True))
                 return
 
-            cache_key = TranslationCache.make_key(
-                source, cfg.source_lang, cfg.target_lang, cfg.model
+            # Cache key includes history so context-sensitive translations stay correct
+            cache_key = self._make_cache_key(
+                source, cfg.source_lang, cfg.target_lang, cfg.model, history
             )
-            # Cache only for zero-history or when force doesn't need fresh context styling
-            if hist_n == 0:
-                cached = self._cache.get(cache_key)
-                if cached is not None:
-                    self.progress.emit("使用翻譯快取…")
-                    self._push_history(source, cached)
-                    self.finished.emit(PipelineResult(source, cached, from_cache=True))
-                    return
+            cached = self._cache.get(cache_key)
+            if cached is not None:
+                self.progress.emit("使用翻譯快取…")
+                self._push_history(source, cached)
+                self.finished.emit(PipelineResult(source, cached, from_cache=True))
+                return
+
+            if self._abort:
+                self.finished.emit(
+                    PipelineResult("", "", skipped=True, status_message="已取消")
+                )
+                return
 
             self.progress.emit(
                 f"LLM 翻譯中…（上下文 {len(history)}/{hist_n} 則）"
@@ -166,13 +203,27 @@ class _Worker(QObject):
                 cfg.target_lang,
                 history=history,
             )
-            if hist_n == 0:
-                self._cache.put(cache_key, translated)
+            self._cache.put(cache_key, translated)
             self._push_history(source, translated)
             self.progress.emit("翻譯完成")
             self.finished.emit(PipelineResult(source, translated, from_cache=False))
         except Exception as exc:
             self.finished.emit(PipelineResult("", "", error=f"管線錯誤：{exc}"))
+
+    @staticmethod
+    def _make_cache_key(
+        source: str,
+        source_lang: str,
+        target_lang: str,
+        model: str,
+        history: list[tuple[str, str]],
+    ) -> str:
+        base = TranslationCache.make_key(source, source_lang, target_lang, model)
+        if not history:
+            return base
+        blob = "\n".join(f"{s}\t{t}" for s, t in history)
+        digest = sha1(blob.encode("utf-8", errors="replace")).hexdigest()[:16]
+        return f"{base}|h:{digest}"
 
     def _push_history(self, source: str, translation: str) -> None:
         source = (source or "").strip()
@@ -208,13 +259,23 @@ class TranslationPipeline(QObject):
     progress = Signal(str)
     busy_changed = Signal(bool)
     _submit = Signal(object)  # PipelineJob
+    _cmd_reset_dedupe = Signal()
+    _cmd_clear_history = Signal()
+    _cmd_clear_cache = Signal()
+    _cmd_abort = Signal()
 
     def __init__(self, parent: QObject | None = None) -> None:
         super().__init__(parent)
         self._thread = QThread(self)
         self._worker = _Worker()
         self._worker.moveToThread(self._thread)
-        self._submit.connect(self._worker.run_job, Qt.ConnectionType.QueuedConnection)
+        queued = Qt.ConnectionType.QueuedConnection
+        self._submit.connect(self._worker.run_job, queued)
+        self._cmd_reset_dedupe.connect(self._worker.reset_dedupe, queued)
+        self._cmd_clear_history.connect(self._worker.clear_history, queued)
+        self._cmd_clear_cache.connect(self._worker.clear_cache, queued)
+        self._cmd_clear_cache.connect(self._worker.clear_history, queued)
+        self._cmd_abort.connect(self._worker.request_abort, queued)
         self._worker.finished.connect(self._on_finished)
         self._worker.progress.connect(self.progress)
         self._thread.start()
@@ -232,9 +293,9 @@ class TranslationPipeline(QObject):
         *,
         force: bool = False,
     ) -> None:
-        job = PipelineJob(cfg=cfg, image=image, force=force)
+        # Snapshot config so mid-job UI mutations cannot race the worker
+        job = PipelineJob(cfg=deepcopy(cfg), image=image, force=force)
         if self._busy:
-            # Keep latest pending; prefer force=True if either is force
             if self._pending is not None and self._pending.force:
                 job.force = True
             self._pending = job
@@ -254,15 +315,19 @@ class TranslationPipeline(QObject):
             self.busy_changed.emit(False)
 
     def reset_dedupe(self) -> None:
-        self._worker.reset_dedupe()
+        self._cmd_reset_dedupe.emit()
 
     def clear_history(self) -> None:
-        self._worker.clear_history()
+        self._cmd_clear_history.emit()
 
     def clear_cache(self) -> None:
-        self._worker.clear_cache()
-        self._worker.clear_history()
+        self._cmd_clear_cache.emit()
 
     def shutdown(self) -> None:
+        self._pending = None
+        self._cmd_abort.emit()
+        # Allow the worker thread event loop to process abort + finish current slot
         self._thread.quit()
-        self._thread.wait(3000)
+        if not self._thread.wait(10000):
+            # Last resort: leave thread; process is exiting
+            pass

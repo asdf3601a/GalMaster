@@ -188,6 +188,7 @@ class LLMTranslator:
                 model=self.model,
                 messages=full_messages,
                 temperature=0.2,
+                max_tokens=self.max_tokens,
             )
             content = resp.choices[0].message.content if resp.choices else ""
             return (content or "").strip()
@@ -201,6 +202,7 @@ class LLMTranslator:
             "model": self.model,
             "messages": full_messages,
             "temperature": 0.2,
+            "max_tokens": self.max_tokens,
         }
         headers = {
             "Authorization": f"Bearer {self.api_key}",
