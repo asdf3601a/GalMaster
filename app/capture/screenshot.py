@@ -397,11 +397,24 @@ def capture_region(
     return capture_screen_region(rel_x, rel_y, rel_w, rel_h)
 
 
-def capture_from_config(cfg: AppConfig) -> Image.Image:
-    """Capture using AppConfig region / bound hwnd / last absolute screen rect."""
+def capture_from_config(
+    cfg: AppConfig,
+    *,
+    method: str | None = None,
+) -> Image.Image:
+    """
+    Capture using AppConfig region / bound hwnd / last absolute screen rect.
+
+    *method* overrides ``cfg.window_capture_method`` when set (e.g. monitor
+    polls force BitBlt while translation capture keeps Automatic/WGC).
+    """
     if not cfg.has_region and not getattr(cfg, "has_abs_region", False):
         raise ValueError("尚未框選 OCR 區域")
-    method = str(getattr(cfg, "window_capture_method", "auto") or "auto")
+    use_method = (
+        method
+        if method is not None
+        else str(getattr(cfg, "window_capture_method", "auto") or "auto")
+    )
     return capture_region(
         hwnd=cfg.bound_hwnd or None,
         rel_x=cfg.region_x,
@@ -412,7 +425,7 @@ def capture_from_config(cfg: AppConfig) -> Image.Image:
         abs_y=int(getattr(cfg, "region_abs_y", 0) or 0),
         abs_w=int(getattr(cfg, "region_abs_w", 0) or 0),
         abs_h=int(getattr(cfg, "region_abs_h", 0) or 0),
-        method=method,
+        method=use_method,
     )
 
 

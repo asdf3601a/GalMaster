@@ -7,16 +7,13 @@ Fallback: PP-OCRv4 ONNX via RapidOCR (same PaddleOCR model family; no paddle DLL
 from __future__ import annotations
 
 import os
-import re
 from pathlib import Path
 
 import numpy as np
 from PIL import Image
 
 from app.ocr.preprocess import preprocess_variants
-
-
-_GARBAGE_RE = re.compile(r"^[\s□■▪▫○●◦‧·\.\-_=~`|\\/]+$")
+from app.ocr.text_clean import clean_ocr_line
 
 
 def _setup_paddle_dlls() -> None:
@@ -56,19 +53,6 @@ def _add_dll_dir(libs: Path) -> None:
             pass
 
 
-def _clean_line(text: str) -> str:
-    s = (text or "").strip()
-    if not s:
-        return ""
-    if _GARBAGE_RE.match(s):
-        return ""
-    # Drop lines that are mostly replacement boxes
-    boxes = s.count("□") + s.count("■")
-    if boxes and boxes >= max(1, len(s.replace(" ", "")) * 0.6):
-        return ""
-    return s
-
-
 def _extract_native_texts(result) -> list[str]:
     """Parse paddleocr 2.x / 3.x predict/ocr outputs into lines."""
     lines: list[str] = []
@@ -94,7 +78,7 @@ def _extract_native_texts(result) -> list[str]:
                             texts = j.get("rec_texts") or j.get("res", {}).get("rec_texts")
                 if texts:
                     for t in texts:
-                        s = _clean_line(str(t))
+                        s = clean_ocr_line(str(t))
                         if s:
                             lines.append(s)
             if lines:
@@ -109,9 +93,9 @@ def _extract_native_texts(result) -> list[str]:
                 if isinstance(item, (list, tuple)) and len(item) >= 2:
                     mid = item[1]
                     if isinstance(mid, (list, tuple)) and mid:
-                        text = _clean_line(str(mid[0]))
+                        text = clean_ocr_line(str(mid[0]))
                     else:
-                        text = _clean_line(str(mid))
+                        text = clean_ocr_line(str(mid))
                     if text:
                         lines.append(text)
     return lines
@@ -124,7 +108,7 @@ def _extract_onnx_lines(result) -> list[str]:
     for item in result:
         if not item or len(item) < 2:
             continue
-        text = _clean_line(str(item[1]))
+        text = clean_ocr_line(str(item[1]))
         if text:
             lines.append(text)
     return lines

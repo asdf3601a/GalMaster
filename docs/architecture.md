@@ -33,7 +33,7 @@ app/
 | `config` | stdlib | UI, OCR engines, pipeline |
 | `capture` | Win32 / mss / WGC, config DTO | UI, LLM, pipeline |
 | `ocr` / `translate` | images / text APIs | UI, controller |
-| `pipeline` | ocr, translate, **pre-captured Image** | UI; ideally no capture |
+| `pipeline` | ocr, translate, **pre-captured Image** | UI; must not call capture |
 | `session` | pure state helpers | Qt widgets (except types if needed) |
 | `app_controller` | services + signals | form field details |
 | `ui` | config, i18n, signals | capture threads / OCR workers |

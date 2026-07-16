@@ -1,4 +1,7 @@
-"""Capture → OCR/VLM → translate pipeline running on a worker thread."""
+"""Process stage: OCR/VLM → translate on a worker thread.
+
+Capture is owned by AppController / CaptureStage; jobs must include a pre-grabbed image.
+"""
 
 from __future__ import annotations
 
@@ -12,7 +15,6 @@ from PIL import Image
 from PySide6.QtCore import QObject, Qt, QThread, Signal
 
 from app.capture.screenshot import (
-    capture_region,
     describe_image,
     is_mostly_blank,
     make_preview_image,
@@ -43,7 +45,7 @@ class PipelineResult:
 @dataclass
 class PipelineJob:
     cfg: AppConfig
-    image: Image.Image | None = None
+    image: Image.Image  # required — Capture stage supplies the frame
     force: bool = False  # manual/hotkey: always run even if text unchanged
 
 
@@ -94,26 +96,11 @@ class _Worker(QObject):
 
         try:
             if img is None:
-                if not cfg.has_region and not getattr(cfg, "has_abs_region", False):
-                    self.finished.emit(
-                        PipelineResult("", "", error=tr("pipe.no_region"))
-                    )
-                    return
-                self.progress.emit(tr("pipe.capturing"))
-                img = capture_region(
-                    hwnd=cfg.bound_hwnd or None,
-                    rel_x=cfg.region_x,
-                    rel_y=cfg.region_y,
-                    rel_w=cfg.region_w,
-                    rel_h=cfg.region_h,
-                    abs_x=int(getattr(cfg, "region_abs_x", 0) or 0),
-                    abs_y=int(getattr(cfg, "region_abs_y", 0) or 0),
-                    abs_w=int(getattr(cfg, "region_abs_w", 0) or 0),
-                    abs_h=int(getattr(cfg, "region_abs_h", 0) or 0),
-                    method=str(
-                        getattr(cfg, "window_capture_method", "auto") or "auto"
-                    ),
+                # Capture is a separate stage; Process never grabs the screen.
+                self.finished.emit(
+                    PipelineResult("", "", error=tr("pipe.no_image"))
                 )
+                return
 
             if self._abort:
                 self.finished.emit(
@@ -487,7 +474,7 @@ class TranslationPipeline(QObject):
     def request(
         self,
         cfg: AppConfig,
-        image: Image.Image | None = None,
+        image: Image.Image,
         *,
         force: bool = False,
     ) -> None:

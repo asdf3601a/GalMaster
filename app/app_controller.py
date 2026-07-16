@@ -137,7 +137,9 @@ class AppController(QObject):
 
         # Auto-monitor: do not force (skip unchanged text; status only)
         self.monitor.region_changed.connect(lambda: self.translate_now(force=False))
-        self.monitor.error.connect(lambda e: self.main.set_status(f"監控錯誤：{e}"))
+        self.monitor.error.connect(
+            lambda e: self.main.set_status(tr("monitor.error", err=e))
+        )
         self.monitor.status.connect(self.on_monitor_status)
 
         # Manual hotkey always runs full pipeline
@@ -190,7 +192,7 @@ class AppController(QObject):
     def refresh_windows(self) -> None:
         wins = enum_windows()
         self.main.set_windows(wins)
-        self.main.set_status(f"視窗列表：{len(wins)} 個")
+        self.main.set_status(tr("status.windows_list", n=len(wins)))
 
     def on_bind_window(self, hwnd: int, title: str) -> None:
         self.cfg.bound_hwnd = hwnd if is_window_valid(hwnd) or hwnd == 0 else 0
@@ -198,10 +200,10 @@ class AppController(QObject):
         self.main.set_region_info(self.cfg)
         self.persist()
         if self.monitor.is_running:
-            self.monitor.update_config(self.cfg)
+            self.monitor.configure(self.cfg)
 
     def start_region_select(self) -> None:
-        self.main.set_status("框選 OCR 區域中…")
+        self.main.set_status(tr("status.selecting_region"))
         # Remember visibility so cancel can restore (not leave UI gone)
         self._pre_select_main_visible = self.main.isVisible()
         self._pre_select_overlay_visible = self.overlay.isVisible()
@@ -226,7 +228,7 @@ class AppController(QObject):
 
     def on_region_cancelled(self) -> None:
         self._restore_after_select()
-        self.main.set_status("已取消框選", busy=False)
+        self.main.set_status(tr("status.region_cancelled"), busy=False)
 
     def on_region_selected(self, x: int, y: int, w: int, h: int) -> None:
         # x,y,w,h are already physical pixels (see RegionSelector + dpi mapping)
@@ -246,7 +248,7 @@ class AppController(QObject):
         self.pipeline.clear_history()
         self.monitor.reset_baseline()
         self.persist()
-        self.main.set_status(f"已設定區域 {w}×{h}（實體像素）")
+        self.main.set_status(tr("status.region_set", w=w, h=h))
         if self.cfg.auto_monitor:
             self.monitor.start(self.cfg)
             running = self.monitor.is_running
@@ -256,11 +258,11 @@ class AppController(QObject):
 
     def on_apply_settings(self) -> None:
         self._apply_from_ui(persist=False)
-        self.main.set_status("已套用設定", busy=False)
+        self.main.set_status(tr("status.settings_applied"), busy=False)
 
     def on_save_settings(self) -> None:
         self._apply_from_ui(persist=True)
-        self.main.set_status("已儲存設定", busy=False)
+        self.main.set_status(tr("status.settings_saved"), busy=False)
 
     def on_cancel_settings(self) -> None:
         self.main.set_config(self.cfg)
@@ -270,7 +272,7 @@ class AppController(QObject):
         elif not self.cfg.auto_monitor and self.monitor.is_running:
             self.monitor.stop()
         self.main.set_monitor_running(self.monitor.is_running)
-        self.main.set_status("已還原設定", busy=False)
+        self.main.set_status(tr("status.settings_restored"), busy=False)
 
     def _apply_from_ui(self, *, persist: bool) -> None:
         old = deepcopy(self.cfg)
@@ -311,7 +313,7 @@ class AppController(QObject):
         if register_hotkey:
             self._register_hotkey()
         if self.monitor.is_running:
-            self.monitor.update_config(cfg)
+            self.monitor.configure(cfg)
         # Sync auto-monitor runtime if flag changed via Apply/Save
         if old_auto is not None and cfg.auto_monitor != old_auto:
             if cfg.auto_monitor:
@@ -331,7 +333,9 @@ class AppController(QObject):
         """Immediate operational toggle (like bind-window): apply monitor fields + persist, no dirty."""
         if enabled:
             if not self.cfg.has_region:
-                self.main.show_error("自動監控", "請先框選 OCR 區域")
+                self.main.show_error(
+                    tr("monitor.need_region_title"), tr("monitor.need_region")
+                )
                 self.cfg.auto_monitor = False
                 self.main.set_monitor_running(False)
                 return
@@ -360,15 +364,13 @@ class AppController(QObject):
             except Exception:
                 pass
             if not running:
-                self.main.set_status(
-                    "自動監控啟動失敗（先前監控執行緒可能仍在結束）", busy=False
-                )
+                self.main.set_status(tr("status.monitor_start_failed"), busy=False)
                 return
             if self.cfg.monitor_stable_ms > 0:
-                mode = f"穩定 {self.cfg.monitor_stable_ms}ms 後辨識"
+                mode = tr("monitor.mode_stable", ms=self.cfg.monitor_stable_ms)
             else:
-                mode = "變化即辨識"
-            self.main.set_status(f"自動監控已開啟（{mode}）…", busy=False)
+                mode = tr("monitor.mode_immediate")
+            self.main.set_status(tr("status.monitor_on", mode=mode), busy=False)
         else:
             self.cfg.auto_monitor = False
             self.monitor.stop()
@@ -379,15 +381,17 @@ class AppController(QObject):
                 self.persist()
             except Exception:
                 pass
-            self.main.set_status("自動監控已關閉", busy=False)
+            self.main.set_status(tr("status.monitor_off"), busy=False)
 
     def _register_hotkey(self) -> None:
         try:
             hwnd = int(self.main.winId())
             self.hotkey.register(hwnd, self.cfg.hotkey)
-            self.main.set_status(f"熱鍵已註冊: {self.cfg.hotkey}")
+            self.main.set_status(
+                tr("status.hotkey_registered", hotkey=self.cfg.hotkey)
+            )
         except Exception as exc:
-            self.main.set_status(f"熱鍵註冊失敗: {exc}")
+            self.main.set_status(tr("status.hotkey_failed", err=exc))
 
     def _ensure_capture_target(self) -> bool:
         """
@@ -395,7 +399,7 @@ class AppController(QObject):
         On stale HWND with abs cache: clear hwnd and use absolute screen coords.
         """
         if not self.cfg.has_region and not self.cfg.has_abs_region:
-            self.main.set_status("請先框選 OCR 區域", busy=False)
+            self.main.set_status(tr("status.need_region"), busy=False)
             try:
                 self.overlay.set_status(tr("status.error"))
             except Exception:
@@ -404,9 +408,7 @@ class AppController(QObject):
 
         if self.cfg.bound_hwnd and not is_window_valid(self.cfg.bound_hwnd):
             if self.cfg.has_abs_region:
-                self.main.set_status(
-                    "綁定視窗已失效，改用上次螢幕座標擷取…", busy=True
-                )
+                self.main.set_status(tr("status.hwnd_stale_abs"), busy=True)
                 self.cfg.bound_hwnd = 0
                 self.cfg.bound_title = ""
                 # Client-relative region is no longer meaningful — use abs as region
@@ -422,9 +424,7 @@ class AppController(QObject):
                 except Exception:
                     pass
             else:
-                self.main.set_status(
-                    "綁定視窗已失效，請重新框選 OCR 區域", busy=False
-                )
+                self.main.set_status(tr("status.hwnd_stale"), busy=False)
                 try:
                     self.overlay.set_status(tr("status.error"))
                 except Exception:
@@ -560,7 +560,7 @@ class AppController(QObject):
         self._restore_overlay_after_capture()
         if err is not None:
             # Status only — keep last overlay / result text (same as empty-OCR soft path)
-            self.main.set_status(f"截圖失敗：{err}", busy=False)
+            self.main.set_status(tr("status.capture_failed", err=err), busy=False)
             try:
                 self.overlay.set_status(tr("status.error"))
             except Exception:

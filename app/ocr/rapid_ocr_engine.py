@@ -2,25 +2,11 @@
 
 from __future__ import annotations
 
-import re
-
 import numpy as np
 from PIL import Image
 
 from app.ocr.preprocess import preprocess_variants
-
-
-_GARBAGE_RE = re.compile(r"^[\s□■▪▫○●◦‧·\.\-_=~`|\\/]+$")
-
-
-def _clean_line(text: str) -> str:
-    s = (text or "").strip()
-    if not s or _GARBAGE_RE.match(s):
-        return ""
-    boxes = s.count("□") + s.count("■")
-    if boxes and boxes >= max(1, len(s.replace(" ", "")) * 0.6):
-        return ""
-    return s
+from app.ocr.text_clean import clean_ocr_line
 
 
 class RapidOCREngine:
@@ -48,7 +34,7 @@ class RapidOCREngine:
             for item in result:
                 if not item or len(item) < 2:
                     continue
-                text = _clean_line(str(item[1]))
+                text = clean_ocr_line(str(item[1]))
                 if text:
                     lines.append(text)
             text = "\n".join(lines).strip()

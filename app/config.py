@@ -45,6 +45,40 @@ PIPELINE_BUFFER_MIN = 1
 PIPELINE_BUFFER_MAX = 16
 PIPELINE_BUFFER_DEFAULT = 3
 
+# OCR engine ids (pure string map — no OCR package import)
+OCR_ENGINE_IDS: tuple[str, ...] = ("oneocr", "manga", "rapid", "paddle")
+DEFAULT_OCR_ENGINE = "oneocr"
+_LEGACY_OCR_TO_DEFAULT = frozenset(
+    {
+        "auto",
+        "hybrid",
+        "windows",
+        "winocr",
+        "winrt",
+        "windows_ai",
+        "snip",
+        "snipping",
+        "windows_classic",
+        "mediaocr",
+        "snipping_oneocr",
+        "win11_oneocr",
+    }
+)
+
+
+def normalize_ocr_engine_id(kind: str | None) -> str:
+    """Map legacy / unknown OCR engine ids to a supported engine (stdlib only)."""
+    k = (kind or "").lower().strip()
+    if k in OCR_ENGINE_IDS:
+        return k
+    if k in _LEGACY_OCR_TO_DEFAULT:
+        return DEFAULT_OCR_ENGINE
+    if k in ("rapidocr",):
+        return "rapid"
+    if k in ("paddleocr",):
+        return "paddle"
+    return DEFAULT_OCR_ENGINE
+
 
 def clamp_pipeline_buffer_size(value: Any) -> int:
     """Clamp process job queue capacity to 1..16 (default 3)."""
@@ -246,10 +280,8 @@ class AppConfig:
         if extra:
             kwargs["extra"] = {**kwargs.get("extra", {}), **extra}
         cfg = cls(**kwargs)
-        # Normalize legacy OCR engine ids and keep wait_stable in sync with ms.
-        from app.ocr.base import normalize_ocr_engine
-
-        cfg.ocr_engine = normalize_ocr_engine(cfg.ocr_engine)
+        # Pure string normalize — no app.ocr import (avoids config → ocr coupling).
+        cfg.ocr_engine = normalize_ocr_engine_id(getattr(cfg, "ocr_engine", None))
         ms = int(getattr(cfg, "monitor_stable_ms", 800) or 0)
         if not bool(getattr(cfg, "monitor_wait_stable", True)):
             cfg.monitor_stable_ms = 0

@@ -9,7 +9,11 @@ from copy import deepcopy
 import numpy as np
 from PySide6.QtCore import QObject, Signal
 
-from app.capture.screenshot import capture_region, image_to_gray_array, mean_abs_diff
+from app.capture.screenshot import (
+    capture_from_config,
+    image_to_gray_array,
+    mean_abs_diff,
+)
 from app.config import AppConfig
 from app.i18n import tr
 
@@ -50,12 +54,10 @@ class RegionMonitor(QObject):
         return z is not None and z.is_alive()
 
     def configure(self, cfg: AppConfig) -> None:
+        """Replace monitor config snapshot (thread-safe)."""
         with self._lock:
             self._cfg = deepcopy(cfg)
             self._apply_cfg_params(cfg)
-
-    def update_config(self, cfg: AppConfig) -> None:
-        self.configure(cfg)
 
     def _apply_cfg_params(self, cfg: AppConfig) -> None:
         interval_ms = int(getattr(cfg, "monitor_interval_ms", 600) or 0)
@@ -175,27 +177,13 @@ class RegionMonitor(QObject):
 
             try:
                 # Change detection uses cheap GDI/bitblt path — full WGC is reserved
-                # for the OCR job (capture_from_config / pipeline) to avoid lag + lock
-                # contention on every poll interval.
+                # for the translation Capture stage to avoid lag + lock contention.
                 mon_method = str(
                     getattr(cfg, "window_capture_method", "auto") or "auto"
                 ).strip().lower()
-                if mon_method == "wgc":
-                    mon_method = "wgc"  # user forced WGC for everything
-                else:
+                if mon_method != "wgc":
                     mon_method = "bitblt"
-                img = capture_region(
-                    hwnd=cfg.bound_hwnd or None,
-                    rel_x=cfg.region_x,
-                    rel_y=cfg.region_y,
-                    rel_w=cfg.region_w,
-                    rel_h=cfg.region_h,
-                    abs_x=int(getattr(cfg, "region_abs_x", 0) or 0),
-                    abs_y=int(getattr(cfg, "region_abs_y", 0) or 0),
-                    abs_w=int(getattr(cfg, "region_abs_w", 0) or 0),
-                    abs_h=int(getattr(cfg, "region_abs_h", 0) or 0),
-                    method=mon_method,
-                )
+                img = capture_from_config(cfg, method=mon_method)
                 if stop_ev.is_set():
                     break
                 gray = image_to_gray_array(img)
