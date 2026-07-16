@@ -347,13 +347,21 @@ def describe_image(img: Image.Image) -> str:
     )
 
 
-def save_last_capture(img: Image.Image) -> str:
-    """Save the latest capture next to the tool for debugging OCR issues."""
-    try:
-        from app.config import project_root
+def make_preview_image(img: Image.Image, *, max_edge: int = 480) -> Image.Image:
+    """Downscale a copy for the main-window capture preview (no disk write)."""
+    preview = img.convert("RGB")
+    w, h = preview.size
+    edge = max(w, h)
+    if edge > max_edge > 0:
+        scale = max_edge / float(edge)
+        preview = preview.resize(
+            (max(1, int(w * scale)), max(1, int(h * scale))),
+            Image.Resampling.LANCZOS,
+        )
+    return preview
 
-        path = project_root() / "last_capture.png"
-        img.convert("RGB").save(path)
-        return str(path)
-    except Exception as exc:
-        return f"(save failed: {exc})"
+
+def save_last_capture(img: Image.Image) -> str:
+    """Deprecated: no longer writes last_capture.png; kept for call-site compatibility."""
+    _ = img
+    return ""

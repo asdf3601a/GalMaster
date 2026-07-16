@@ -1,4 +1,4 @@
-"""Capture → OCR → translate pipeline running on a worker thread."""
+"""Capture → OCR/VLM → translate pipeline running on a worker thread."""
 
 from __future__ import annotations
 
@@ -6,6 +6,7 @@ from collections import deque
 from copy import deepcopy
 from dataclasses import dataclass
 from hashlib import sha1
+import io
 
 from PIL import Image
 from PySide6.QtCore import QObject, Qt, QThread, Signal
@@ -14,12 +15,15 @@ from app.capture.screenshot import (
     capture_region,
     describe_image,
     is_mostly_blank,
-    save_last_capture,
+    make_preview_image,
 )
 from app.config import AppConfig
 from app.ocr.base import OCREngine, create_ocr_engine
 from app.translate.cache import TranslationCache
-from app.translate.llm_translator import LLMTranslator
+from app.translate.llm_translator import (
+    LLMTranslator,
+    sampling_fingerprint,
+)
 
 
 @dataclass
@@ -44,6 +48,7 @@ class PipelineJob:
 class _Worker(QObject):
     finished = Signal(object)  # PipelineResult
     progress = Signal(str)
+    preview_ready = Signal(object)  # small PIL Image for UI
 
     def __init__(self) -> None:
         super().__init__()
@@ -51,6 +56,7 @@ class _Worker(QObject):
         self._ocr_kind = ""
         self._cache = TranslationCache()
         self._last_source = ""
+        self._last_image_fp = ""
         # Sliding window of (source, translation) for LLM context
         self._history: deque[tuple[str, str]] = deque(maxlen=32)
         self._abort = False
@@ -105,7 +111,11 @@ class _Worker(QObject):
                 return
 
             self.progress.emit(f"準備影像…（{describe_image(img)}）")
-            debug_path = save_last_capture(img)
+            try:
+                self.preview_ready.emit(make_preview_image(img))
+            except Exception:
+                pass
+
             if is_mostly_blank(img):
                 self.finished.emit(
                     PipelineResult(
@@ -114,101 +124,228 @@ class _Worker(QObject):
                         error=(
                             "截圖幾乎空白/全黑（可能被 Overlay 擋住、視窗內容未繪出、"
                             f"或框選區域不對）。{describe_image(img)}\n"
-                            f"已存截圖：{debug_path} — 請打開確認是否看得到文字。"
+                            "請查看主視窗擷取預覽確認是否看得到文字。"
                         ),
                     )
                 )
                 return
 
-            ocr = self._get_ocr(cfg.ocr_engine, getattr(cfg, "source_lang", "ja") or "ja")
-            backend = getattr(ocr, "backend_label", None) or cfg.ocr_engine
-            self.progress.emit(f"OCR 辨識中（{backend}）…")
-            source = ocr.recognize(img).strip()
-            if self._abort:
-                self.finished.emit(
-                    PipelineResult("", "", skipped=True, status_message="已取消")
-                )
-                return
-            if not source:
-                self.finished.emit(
-                    PipelineResult(
-                        "",
-                        "",
-                        error=(
-                            "OCR 未辨識到文字。"
-                            f"截圖 {describe_image(img)}\n"
-                            f"已存：{debug_path}\n"
-                            "請確認截圖裡有字；日文可試 OneOCR 或 Manga OCR，並重新框選對話框。"
-                        ),
-                    )
-                )
-                return
-
-            # Auto-monitor: skip unchanged text. Manual/hotkey (force=True): always continue.
-            if not force and source == self._last_source:
-                self.finished.emit(
-                    PipelineResult(
-                        source,
-                        "",
-                        skipped=True,
-                        status_message="文字未變化（已略過翻譯）",
-                    )
-                )
-                return
-            self._last_source = source
-
-            hist_n = max(0, int(getattr(cfg, "context_history_size", 3) or 0))
-            history = list(self._history)[-hist_n:] if hist_n > 0 else []
-
-            if not cfg.has_llm:
-                self.progress.emit("OCR 完成（未設定 LLM）")
-                self._push_history(source, "")
-                self.finished.emit(PipelineResult(source, "", ocr_only=True))
-                return
-
-            # Cache key includes history so context-sensitive translations stay correct
-            cache_key = self._make_cache_key(
-                source, cfg.source_lang, cfg.target_lang, cfg.model, history
-            )
-            cached = self._cache.get(cache_key)
-            if cached is not None:
-                self.progress.emit("使用翻譯快取…")
-                self._push_history(source, cached)
-                self.finished.emit(PipelineResult(source, cached, from_cache=True))
-                return
-
-            if self._abort:
-                self.finished.emit(
-                    PipelineResult("", "", skipped=True, status_message="已取消")
-                )
-                return
-
-            self.progress.emit(
-                f"LLM 翻譯中…（上下文 {len(history)}/{hist_n} 則）"
-                if hist_n
-                else "LLM 翻譯中…"
-            )
-            translator = LLMTranslator(
-                api_key=cfg.api_key,
-                base_url=cfg.base_url,
-                model=cfg.model,
-                custom_prompt=cfg.custom_prompt,
-                protocol=getattr(cfg, "api_protocol", "openai") or "openai",
-                anthropic_version=getattr(cfg, "anthropic_version", "2023-06-01"),
-                max_tokens=int(getattr(cfg, "max_tokens", 2048) or 2048),
-            )
-            translated = translator.translate(
-                source,
-                cfg.source_lang,
-                cfg.target_lang,
-                history=history,
-            )
-            self._cache.put(cache_key, translated)
-            self._push_history(source, translated)
-            self.progress.emit("翻譯完成")
-            self.finished.emit(PipelineResult(source, translated, from_cache=False))
+            mode = (getattr(cfg, "pipeline_mode", "ocr") or "ocr").strip().lower()
+            if mode == "vlm":
+                self._run_vlm(cfg, img, force=force)
+            else:
+                self._run_ocr(cfg, img, force=force)
         except Exception as exc:
             self.finished.emit(PipelineResult("", "", error=f"管線錯誤：{exc}"))
+
+    def _run_ocr(self, cfg: AppConfig, img: Image.Image, *, force: bool) -> None:
+        ocr = self._get_ocr(cfg.ocr_engine, getattr(cfg, "source_lang", "ja") or "ja")
+        backend = getattr(ocr, "backend_label", None) or cfg.ocr_engine
+        self.progress.emit(f"OCR 辨識中（{backend}）…")
+        source = ocr.recognize(img).strip()
+        if self._abort:
+            self.finished.emit(
+                PipelineResult("", "", skipped=True, status_message="已取消")
+            )
+            return
+        if not source:
+            self.finished.emit(
+                PipelineResult(
+                    "",
+                    "",
+                    error=(
+                        "OCR 未辨識到文字。"
+                        f"截圖 {describe_image(img)}\n"
+                        "請查看主視窗擷取預覽；日文可試 OneOCR 或 Manga OCR，並重新框選對話框。"
+                    ),
+                )
+            )
+            return
+
+        # Auto-monitor: skip unchanged text. Manual/hotkey (force=True): always continue.
+        if not force and source == self._last_source:
+            self.finished.emit(
+                PipelineResult(
+                    source,
+                    "",
+                    skipped=True,
+                    status_message="文字未變化（已略過翻譯）",
+                )
+            )
+            return
+        self._last_source = source
+
+        hist_n = max(0, int(getattr(cfg, "context_history_size", 3) or 0))
+        history = list(self._history)[-hist_n:] if hist_n > 0 else []
+
+        if not cfg.has_llm:
+            self.progress.emit("OCR 完成（未設定 LLM）")
+            self._push_history(source, "")
+            self.finished.emit(PipelineResult(source, "", ocr_only=True))
+            return
+
+        samp = self._sampling_fp(cfg)
+        cache_key = self._make_cache_key(
+            f"ocr|{source}",
+            cfg.source_lang,
+            cfg.target_lang,
+            cfg.model,
+            history,
+            samp,
+        )
+        cached = self._cache.get(cache_key)
+        if cached is not None:
+            self.progress.emit("使用翻譯快取…")
+            self._push_history(source, cached)
+            self.finished.emit(PipelineResult(source, cached, from_cache=True))
+            return
+
+        if self._abort:
+            self.finished.emit(
+                PipelineResult("", "", skipped=True, status_message="已取消")
+            )
+            return
+
+        self.progress.emit(
+            f"LLM 翻譯中…（上下文 {len(history)}/{hist_n} 則）"
+            if hist_n
+            else "LLM 翻譯中…"
+        )
+        translator = self._make_translator(cfg)
+        translated = translator.translate(
+            source,
+            cfg.source_lang,
+            cfg.target_lang,
+            history=history,
+        )
+        self._cache.put(cache_key, translated)
+        self._push_history(source, translated)
+        self.progress.emit("翻譯完成")
+        self.finished.emit(PipelineResult(source, translated, from_cache=False))
+
+    def _run_vlm(self, cfg: AppConfig, img: Image.Image, *, force: bool) -> None:
+        if not cfg.has_llm:
+            self.finished.emit(
+                PipelineResult(
+                    "",
+                    "",
+                    error="VLM 模式需要 API Key（將截圖直接送給多模態 LLM）。",
+                )
+            )
+            return
+
+        img_fp = self._image_fingerprint(img)
+        if not force and img_fp and img_fp == self._last_image_fp:
+            self.finished.emit(
+                PipelineResult(
+                    "",
+                    "",
+                    skipped=True,
+                    status_message="畫面未變化（已略過 VLM）",
+                )
+            )
+            return
+
+        hist_n = max(0, int(getattr(cfg, "context_history_size", 3) or 0))
+        history = list(self._history)[-hist_n:] if hist_n > 0 else []
+        samp = self._sampling_fp(cfg)
+        cache_key = self._make_cache_key(
+            f"vlm|{img_fp}",
+            cfg.source_lang,
+            cfg.target_lang,
+            cfg.model,
+            history,
+            samp,
+        )
+        cached = self._cache.get(cache_key)
+        if cached is not None:
+            # Cache stores "source\x1etranslation"
+            if "\x1e" in cached:
+                src_c, tr_c = cached.split("\x1e", 1)
+            else:
+                src_c, tr_c = "", cached
+            self.progress.emit("使用翻譯快取…")
+            self._last_image_fp = img_fp
+            self._push_history(src_c or "(VLM)", tr_c)
+            self.finished.emit(PipelineResult(src_c, tr_c, from_cache=True))
+            return
+
+        if self._abort:
+            self.finished.emit(
+                PipelineResult("", "", skipped=True, status_message="已取消")
+            )
+            return
+
+        self.progress.emit(
+            f"VLM 翻譯中…（上下文 {len(history)}/{hist_n} 則）"
+            if hist_n
+            else "VLM 翻譯中…"
+        )
+        translator = self._make_translator(cfg)
+        source, translated = translator.translate_image(
+            img,
+            cfg.source_lang,
+            cfg.target_lang,
+            history=history,
+        )
+        if not (translated or "").strip() and not (source or "").strip():
+            self.finished.emit(
+                PipelineResult("", "", error="VLM 未回傳可用文字，請確認模型支援影像輸入。")
+            )
+            return
+        if not (translated or "").strip() and (source or "").strip():
+            translated = source  # model only returned source
+        source = (source or "").strip() or "(VLM)"
+        translated = (translated or "").strip()
+        self._cache.put(cache_key, f"{source}\x1e{translated}")
+        self._last_image_fp = img_fp
+        self._push_history(source, translated)
+        self.progress.emit("翻譯完成")
+        self.finished.emit(PipelineResult(source, translated, from_cache=False))
+
+    @staticmethod
+    def _make_translator(cfg: AppConfig) -> LLMTranslator:
+        return LLMTranslator(
+            api_key=cfg.api_key,
+            base_url=cfg.base_url,
+            model=cfg.model,
+            custom_prompt=cfg.custom_prompt,
+            protocol=getattr(cfg, "api_protocol", "openai") or "openai",
+            anthropic_version=getattr(cfg, "anthropic_version", "2023-06-01"),
+            max_tokens=int(getattr(cfg, "max_tokens", 2048) or 2048),
+            temperature=getattr(cfg, "temperature", None),
+            top_p=getattr(cfg, "top_p", None),
+            top_k=getattr(cfg, "top_k", None),
+            frequency_penalty=getattr(cfg, "frequency_penalty", None),
+            presence_penalty=getattr(cfg, "presence_penalty", None),
+            reasoning_effort=getattr(cfg, "reasoning_effort", "") or "",
+            seed=getattr(cfg, "seed", None),
+        )
+
+    @staticmethod
+    def _sampling_fp(cfg: AppConfig) -> str:
+        return sampling_fingerprint(
+            temperature=getattr(cfg, "temperature", None),
+            top_p=getattr(cfg, "top_p", None),
+            top_k=getattr(cfg, "top_k", None),
+            frequency_penalty=getattr(cfg, "frequency_penalty", None),
+            presence_penalty=getattr(cfg, "presence_penalty", None),
+            reasoning_effort=getattr(cfg, "reasoning_effort", "") or "",
+            seed=getattr(cfg, "seed", None),
+            max_tokens=int(getattr(cfg, "max_tokens", 2048) or 2048),
+        )
+
+    @staticmethod
+    def _image_fingerprint(img: Image.Image) -> str:
+        """Cheap content hash for VLM dedupe (downscaled grayscale)."""
+        try:
+            small = img.convert("L")
+            small.thumbnail((64, 64))
+            buf = io.BytesIO()
+            small.save(buf, format="PNG")
+            return sha1(buf.getvalue()).hexdigest()
+        except Exception:
+            return sha1(img.tobytes()).hexdigest()
 
     @staticmethod
     def _make_cache_key(
@@ -217,8 +354,11 @@ class _Worker(QObject):
         target_lang: str,
         model: str,
         history: list[tuple[str, str]],
+        sampling_fp: str = "",
     ) -> str:
         base = TranslationCache.make_key(source, source_lang, target_lang, model)
+        if sampling_fp:
+            base = f"{base}|s:{sha1(sampling_fp.encode()).hexdigest()[:12]}"
         if not history:
             return base
         blob = "\n".join(f"{s}\t{t}" for s, t in history)
@@ -244,6 +384,7 @@ class _Worker(QObject):
 
     def reset_dedupe(self) -> None:
         self._last_source = ""
+        self._last_image_fp = ""
 
     def clear_history(self) -> None:
         self._history.clear()
@@ -257,6 +398,7 @@ class TranslationPipeline(QObject):
 
     finished = Signal(object)
     progress = Signal(str)
+    preview_ready = Signal(object)  # PIL Image (thumbnail)
     busy_changed = Signal(bool)
     _submit = Signal(object)  # PipelineJob
     _cmd_reset_dedupe = Signal()
@@ -278,6 +420,7 @@ class TranslationPipeline(QObject):
         self._cmd_abort.connect(self._worker.request_abort, queued)
         self._worker.finished.connect(self._on_finished)
         self._worker.progress.connect(self.progress)
+        self._worker.preview_ready.connect(self.preview_ready)
         self._thread.start()
         self._busy = False
         self._pending: PipelineJob | None = None

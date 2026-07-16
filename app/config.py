@@ -41,6 +41,37 @@ LANGUAGE_CHOICES: list[tuple[str, str]] = [
 ]
 
 
+def normalize_hex_color(value: Any, default: str) -> str:
+    """Normalize to #RRGGBB; invalid values fall back to default."""
+    fallback = default if isinstance(default, str) and default.startswith("#") else "#ffffff"
+    if value is None:
+        return fallback
+    s = str(value).strip()
+    if not s:
+        return fallback
+    if not s.startswith("#"):
+        s = "#" + s
+    s = s.lower()
+    if len(s) == 4 and all(c in "0123456789abcdef" for c in s[1:]):
+        # #RGB → #RRGGBB
+        s = "#" + "".join(ch * 2 for ch in s[1:])
+    if len(s) == 7 and all(c in "0123456789abcdef" for c in s[1:]):
+        return s
+    return fallback
+
+
+def _clamp_int(value: Any, lo: int, hi: int, default: int) -> int:
+    try:
+        return max(lo, min(hi, int(value)))
+    except (TypeError, ValueError):
+        return default
+
+
+def _normalize_text_align(value: Any, default: str = "left") -> str:
+    s = (str(value) if value is not None else default).strip().lower()
+    return s if s in ("left", "center") else default
+
+
 @dataclass
 class AppConfig:
     # LLM (optional — empty api_key => OCR only)
@@ -57,8 +88,22 @@ class AppConfig:
     # Sliding window: how many prior OCR/translation turns to send as LLM context.
     # 0 = current line only (no history).
     context_history_size: int = 3
+    # Optional sampling / reasoning — None / "" means omit from API request body.
+    temperature: float | None = None
+    top_p: float | None = None
+    top_k: int | None = None
+    frequency_penalty: float | None = None
+    presence_penalty: float | None = None
+    reasoning_effort: str = ""  # "", or none|low|medium|high
+    seed: int | None = None
 
-    # Languages
+    # Pipeline: "ocr" = local OCR then optional text LLM; "vlm" = image → multimodal LLM
+    pipeline_mode: str = "ocr"
+
+    # UI language: "zh-Hant" | "en"
+    ui_language: str = "zh-Hant"
+
+    # Languages (translation source/target)
     source_lang: str = "ja"
     target_lang: str = "zh-Hant"
 
@@ -77,7 +122,19 @@ class AppConfig:
 
     # Overlay
     overlay_opacity: float = 0.88
+    # Legacy single size (kept for migration / sync with translation size)
     overlay_font_size: int = 16
+    overlay_show_source: bool = True
+    overlay_show_translation: bool = True
+    overlay_font_family: str = ""
+    overlay_source_font_size: int = 14
+    overlay_translation_font_size: int = 16
+    overlay_source_color: str = "#c8c8d8"
+    overlay_translation_color: str = "#ffffff"
+    overlay_translation_bold: bool = True
+    overlay_text_align: str = "left"  # left | center
+    overlay_bg_color: str = "#14141c"
+    overlay_bg_alpha: int = 210  # 0–255
     overlay_click_through: bool = False
     overlay_x: int = 80
     overlay_y: int = 80
@@ -101,11 +158,28 @@ class AppConfig:
     # OCR engine: "oneocr" | "manga" | "rapid" | "paddle"
     ocr_engine: str = "oneocr"
 
+    # OBS Browser Source subtitle server (127.0.0.1 only)
+    obs_enabled: bool = False
+    obs_port: int = 8765
+    obs_show_source: bool = False
+    obs_show_translation: bool = True
+    # Legacy single size (migration / sync with translation size)
+    obs_font_size: int = 28
+    obs_font_family: str = ""
+    obs_source_font_size: int = 20
+    obs_translation_font_size: int = 28
+    obs_source_color: str = "#d8d8e0"
+    obs_translation_color: str = "#ffffff"
+    obs_translation_bold: bool = True
+    obs_text_align: str = "left"  # left | center
+    obs_bg_color: str = "#000000"
+    obs_bg_alpha: int = 140  # 0–255
+
     # Window geometry
     main_window_x: int = 100
     main_window_y: int = 100
     main_window_w: int = 440
-    main_window_h: int = 560
+    main_window_h: int = 640
 
     extra: dict[str, Any] = field(default_factory=dict)
 
@@ -161,6 +235,113 @@ class AppConfig:
         else:
             cfg.monitor_stable_ms = max(0, ms)
             cfg.monitor_wait_stable = cfg.monitor_stable_ms > 0
+        mode = (getattr(cfg, "pipeline_mode", "ocr") or "ocr").strip().lower()
+        cfg.pipeline_mode = mode if mode in ("ocr", "vlm") else "ocr"
+        ui_lang = (getattr(cfg, "ui_language", "zh-Hant") or "zh-Hant").strip()
+        cfg.ui_language = ui_lang if ui_lang in ("zh-Hant", "en") else "zh-Hant"
+        # Coerce optional sampling fields: empty string → None for numeric optionals
+        for opt in (
+            "temperature",
+            "top_p",
+            "top_k",
+            "frequency_penalty",
+            "presence_penalty",
+            "seed",
+        ):
+            val = getattr(cfg, opt, None)
+            if val is None or val == "":
+                setattr(cfg, opt, None)
+        # top_k 0 means "unset" (same as null)
+        if getattr(cfg, "top_k", None) is not None and int(cfg.top_k) <= 0:
+            cfg.top_k = None
+        effort = getattr(cfg, "reasoning_effort", None)
+        if effort is None:
+            cfg.reasoning_effort = ""
+        else:
+            cfg.reasoning_effort = str(effort).strip().lower()
+        try:
+            cfg.obs_port = max(1, min(65535, int(getattr(cfg, "obs_port", 8765) or 8765)))
+        except (TypeError, ValueError):
+            cfg.obs_port = 8765
+
+        # --- Overlay / OBS style migration & clamp ---
+        has_ov_src_sz = "overlay_source_font_size" in data
+        has_ov_tr_sz = "overlay_translation_font_size" in data
+        legacy_ov = _clamp_int(data.get("overlay_font_size", 16), 10, 72, 16)
+        if not has_ov_tr_sz:
+            cfg.overlay_translation_font_size = legacy_ov
+        else:
+            cfg.overlay_translation_font_size = _clamp_int(
+                cfg.overlay_translation_font_size, 10, 72, 16
+            )
+        if not has_ov_src_sz:
+            cfg.overlay_source_font_size = max(10, cfg.overlay_translation_font_size - 2)
+        else:
+            cfg.overlay_source_font_size = _clamp_int(
+                cfg.overlay_source_font_size, 10, 72, 14
+            )
+        cfg.overlay_font_size = cfg.overlay_translation_font_size
+        cfg.overlay_show_source = bool(getattr(cfg, "overlay_show_source", True))
+        cfg.overlay_show_translation = bool(getattr(cfg, "overlay_show_translation", True))
+        if not cfg.overlay_show_source and not cfg.overlay_show_translation:
+            cfg.overlay_show_translation = True
+        cfg.overlay_font_family = str(getattr(cfg, "overlay_font_family", "") or "")
+        cfg.overlay_source_color = normalize_hex_color(
+            getattr(cfg, "overlay_source_color", None), "#c8c8d8"
+        )
+        cfg.overlay_translation_color = normalize_hex_color(
+            getattr(cfg, "overlay_translation_color", None), "#ffffff"
+        )
+        cfg.overlay_translation_bold = bool(getattr(cfg, "overlay_translation_bold", True))
+        cfg.overlay_text_align = _normalize_text_align(
+            getattr(cfg, "overlay_text_align", "left"), "left"
+        )
+        cfg.overlay_bg_color = normalize_hex_color(
+            getattr(cfg, "overlay_bg_color", None), "#14141c"
+        )
+        cfg.overlay_bg_alpha = _clamp_int(
+            getattr(cfg, "overlay_bg_alpha", 210), 0, 255, 210
+        )
+        try:
+            cfg.overlay_opacity = max(0.3, min(1.0, float(cfg.overlay_opacity)))
+        except (TypeError, ValueError):
+            cfg.overlay_opacity = 0.88
+
+        has_obs_src_sz = "obs_source_font_size" in data
+        has_obs_tr_sz = "obs_translation_font_size" in data
+        legacy_obs = _clamp_int(data.get("obs_font_size", 28), 10, 96, 28)
+        if not has_obs_tr_sz:
+            cfg.obs_translation_font_size = legacy_obs
+        else:
+            cfg.obs_translation_font_size = _clamp_int(
+                cfg.obs_translation_font_size, 10, 96, 28
+            )
+        if not has_obs_src_sz:
+            cfg.obs_source_font_size = max(
+                10, int(round(cfg.obs_translation_font_size * 0.72))
+            )
+        else:
+            cfg.obs_source_font_size = _clamp_int(cfg.obs_source_font_size, 10, 96, 20)
+        cfg.obs_font_size = cfg.obs_translation_font_size
+        cfg.obs_show_source = bool(getattr(cfg, "obs_show_source", False))
+        cfg.obs_show_translation = bool(getattr(cfg, "obs_show_translation", True))
+        if not cfg.obs_show_source and not cfg.obs_show_translation:
+            cfg.obs_show_translation = True
+        cfg.obs_font_family = str(getattr(cfg, "obs_font_family", "") or "")
+        cfg.obs_source_color = normalize_hex_color(
+            getattr(cfg, "obs_source_color", None), "#d8d8e0"
+        )
+        cfg.obs_translation_color = normalize_hex_color(
+            getattr(cfg, "obs_translation_color", None), "#ffffff"
+        )
+        cfg.obs_translation_bold = bool(getattr(cfg, "obs_translation_bold", True))
+        cfg.obs_text_align = _normalize_text_align(
+            getattr(cfg, "obs_text_align", "left"), "left"
+        )
+        cfg.obs_bg_color = normalize_hex_color(
+            getattr(cfg, "obs_bg_color", None), "#000000"
+        )
+        cfg.obs_bg_alpha = _clamp_int(getattr(cfg, "obs_bg_alpha", 140), 0, 255, 140)
         return cfg
 
 

@@ -6,11 +6,14 @@
 
 - **框選 OCR 區域** + **全域熱鍵**（預設 `Ctrl+Shift+T`）擷取並翻譯  
 - **綁定遊戲視窗**（區域隨視窗；擷取優先取視窗內容，少截到 Overlay）  
-- **自動監控**：頂欄 **開始／停止監控**；可設穩定時間（0 = 變化即辨識）  
+- **自動監控**：頂欄 **開始／停止監控**；穩定時間／間隔／觸發冷卻／變化閾值  
 - **主視窗工作狀態**：狀態與套用／儲存／取消固定在頂部  
 - **半透明置頂 Overlay**（可拖曳、調透明度／字級、滑鼠穿透；結束請在主程式）  
-- **OCR**：OneOCR（預設）／Manga OCR／RapidOCR／PaddleOCR  
-- **多語系** + **OpenAI / Anthropic Compatible LLM** 翻譯（可選）  
+- **OCR**：OneOCR（預設）／Manga OCR／RapidOCR／PaddleOCR；亦可 **VLM 直翻**（略過 OCR，截圖送多模態 LLM）  
+- **OpenAI / Anthropic Compatible LLM** 翻譯（可選）+ **進階採樣參數**（未勾選不送出）  
+- **介面語言**：繁體中文／English  
+- **OBS Browser Source** 字幕頁（本機 `127.0.0.1`）  
+- **擷取預覽**（主視窗即時顯示，不再寫 `last_capture.png`）  
 
 ## 環境（uv）
 
@@ -57,16 +60,47 @@ XAI_API_KEY=...
 設定存到**工具目錄**的 `config.json`（與 `start.bat` 同層；已列入 `.gitignore`）。  
 若尚無本機設定，會嘗試從舊版 `%APPDATA%\GalMaster\config.json` 遷移一次。
 
-**LLM 為可選**：API Key 留空時只做 OCR，不呼叫翻譯。
+**LLM 為可選**：API Key 留空時，OCR 模式只做辨識；**VLM 模式必須有 API Key**。
+
+### 管線模式
+
+| 模式 | 行為 |
+|------|------|
+| **OCR → 翻譯** | 本地 OCR →（有 Key）文字 LLM |
+| **VLM 直翻** | 截圖 → 多模態 LLM（需 vision 模型） |
+
+### LLM 進階參數
+
+temperature / top_p / top_k / frequency_penalty / presence_penalty / reasoning_effort / seed 等可在 UI 勾選後送出。  
+**未勾選的參數不會出現在 API JSON**（避免閘道拒收）。
+
+### 自動監控節流
+
+| 設定 | 說明 |
+|------|------|
+| **穩定時間** | 變化後需安靜 N ms；**0** = 變化即觸發 |
+| **間隔** | 輪詢畫面間隔；0 → 預設 600 ms（下限約 200） |
+| **觸發冷卻** | 兩次自動觸發最小間隔；**0** = 不額外冷卻 |
+| 管線忙碌 | 處理中略過新的自動觸發 |
+
+手動／熱鍵翻譯不受間隔與冷卻限制。
+
+### OBS 字幕
+
+1. 勾選 **啟用 OBS 伺服器**，設定連接埠（預設 `8765`）→ **套用**  
+2. OBS → 來源 → **瀏覽器** → URL：`http://127.0.0.1:8765/`  
+3. 可加 `?size=32` 或 `?source=1` 調整字級／顯示原文  
+
+僅綁定本機 loopback。
 
 ## 使用流程
 
 1. 啟動 `uv run galmaster`  
 2. （建議）從下拉選單綁定遊戲視窗 →「重新整理」  
 3. 按 **框選 OCR 區域**，拖曳對話框範圍  
-4. 設定來源／目標語言與 API Key → 頂欄 **套用** 或 **儲存**  
-5. 按 **立即翻譯** 或熱鍵 `Ctrl+Shift+T`  
-6. 頂欄 **開始監控**／**停止監控**；擷取區可設穩定時間／間隔／變化閾值（穩定時間 **0** = 變化即辨識）  
+4. 設定管線模式、來源／目標語言與 API Key → 頂欄 **套用** 或 **儲存**  
+5. 按 **立即翻譯** 或熱鍵 `Ctrl+Shift+T`；主視窗 **擷取預覽** 可對框  
+6. 頂欄 **開始監控**／**停止監控**  
 7. Overlay 可拖曳；「穿透」讓滑鼠點穿到遊戲  
 8. 結束請用主視窗 **結束程式** 或系統匣「結束」（會一併關掉 Overlay）  
 
@@ -76,7 +110,7 @@ XAI_API_KEY=...
 
 ## OCR
 
-可選引擎（預設 **OneOCR**）：
+可選引擎（預設 **OneOCR**；VLM 模式不使用）：
 
 | 引擎 | 說明 |
 |------|------|
@@ -85,8 +119,7 @@ XAI_API_KEY=...
 | **RapidOCR** | ONNX 輕量多語 |
 | **PaddleOCR** | PP-OCR（較重；可選 `uv sync --extra paddle-native`） |
 
-每次辨識會把截圖存成工具目錄的 `last_capture.png`，失敗時可打開確認是否框到字。  
-若全黑：多半是框選區域沒有文字、或視窗內容未正確擷取——請重新框選並確認綁定視窗仍有效。
+擷取結果顯示於主視窗預覽；若全黑，請重新框選並確認綁定視窗仍有效。
 
 首次 OneOCR 會從已安裝的剪取工具複製模型到 `tools/oneocr`。
 
@@ -97,10 +130,12 @@ app/
   main.py              # 進入點
   app_controller.py    # 串起 UI / 熱鍵 / 管線
   config.py
-  pipeline.py          # 截圖 → OCR → LLM
-  capture/             # 視窗、截圖、監控（含 stable frame）
+  pipeline.py          # 截圖 → OCR|VLM → LLM
+  capture/             # 視窗、截圖、監控
   ocr/                 # OneOCR / Manga / Rapid / Paddle
-  translate/           # LLM + 快取
+  translate/           # LLM + 快取 + sampling
+  obs/                 # Browser Source 字幕伺服器
+  i18n/                # en / zh-Hant
   ui/                  # 主視窗、Overlay、框選
   hotkeys/             # 全域熱鍵
 ```

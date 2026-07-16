@@ -66,6 +66,41 @@ def test_context_history_size_default():
     assert c.context_history_size == 5
 
 
+def test_pipeline_mode_and_optional_llm_defaults():
+    c = AppConfig()
+    assert c.pipeline_mode == "ocr"
+    assert c.temperature is None
+    assert c.top_p is None
+    assert c.top_k is None
+    assert c.reasoning_effort == ""
+    assert c.ui_language == "zh-Hant"
+    assert c.obs_enabled is False
+    assert c.obs_port == 8765
+
+
+def test_from_dict_pipeline_and_sampling():
+    c = AppConfig.from_dict(
+        {
+            "pipeline_mode": "vlm",
+            "temperature": 0.2,
+            "top_k": 0,
+            "reasoning_effort": "HIGH",
+            "ui_language": "en",
+            "obs_port": 9000,
+        }
+    )
+    assert c.pipeline_mode == "vlm"
+    assert c.temperature == 0.2
+    assert c.top_k is None  # 0 normalized to unset
+    assert c.reasoning_effort == "high"
+    assert c.ui_language == "en"
+    assert c.obs_port == 9000
+
+    c2 = AppConfig.from_dict({"pipeline_mode": "nope", "ui_language": "ja"})
+    assert c2.pipeline_mode == "ocr"
+    assert c2.ui_language == "zh-Hant"
+
+
 def test_abs_region():
     c = AppConfig()
     assert not c.has_abs_region
@@ -83,3 +118,45 @@ def test_default_config_path_is_project_dir():
     path = default_config_path()
     assert path.name == "config.json"
     assert path.parent == project_root()
+
+
+def test_overlay_obs_style_defaults():
+    c = AppConfig()
+    assert c.overlay_show_source is True
+    assert c.overlay_show_translation is True
+    assert c.overlay_source_font_size == 14
+    assert c.overlay_translation_font_size == 16
+    assert c.obs_show_translation is True
+    assert c.obs_translation_font_size == 28
+
+
+def test_legacy_font_size_migration():
+    c = AppConfig.from_dict({"overlay_font_size": 20, "obs_font_size": 40})
+    assert c.overlay_translation_font_size == 20
+    assert c.overlay_source_font_size == 18
+    assert c.overlay_font_size == 20
+    assert c.obs_translation_font_size == 40
+    assert c.obs_source_font_size == max(10, int(round(40 * 0.72)))
+    assert c.obs_font_size == 40
+
+
+def test_style_color_and_align_normalize():
+    from app.config import normalize_hex_color
+
+    assert normalize_hex_color("#abc", "#ffffff") == "#aabbcc"
+    assert normalize_hex_color("ff0000", "#ffffff") == "#ff0000"
+    assert normalize_hex_color("nope", "#c8c8d8") == "#c8c8d8"
+
+    c = AppConfig.from_dict(
+        {
+            "overlay_source_color": "fff",
+            "overlay_text_align": "CENTER",
+            "overlay_show_source": False,
+            "overlay_show_translation": False,
+            "obs_bg_alpha": 999,
+        }
+    )
+    assert c.overlay_source_color == "#ffffff"
+    assert c.overlay_text_align == "center"
+    assert c.overlay_show_translation is True  # forced at least one
+    assert c.obs_bg_alpha == 255

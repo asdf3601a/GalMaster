@@ -78,34 +78,45 @@ QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
 }
 """
 
-OVERLAY_PANEL_STYLE = """
-QFrame#panel {
-    background-color: rgba(20, 20, 28, 210);
+def _hex_to_rgb(hex_color: str) -> tuple[int, int, int]:
+    s = (hex_color or "#000000").lstrip("#")
+    if len(s) == 3:
+        s = "".join(ch * 2 for ch in s)
+    try:
+        return int(s[0:2], 16), int(s[2:4], 16), int(s[4:6], 16)
+    except (ValueError, IndexError):
+        return 20, 20, 28
+
+
+def overlay_panel_style(
+    *,
+    bg_color: str = "#14141c",
+    bg_alpha: int = 210,
+    source_color: str = "#c8c8d8",
+    translation_color: str = "#ffffff",
+) -> str:
+    """Build overlay panel stylesheet from runtime colors."""
+    r, g, b = _hex_to_rgb(bg_color)
+    a = max(0, min(255, int(bg_alpha)))
+    return f"""
+QFrame#panel {{
+    background-color: rgba({r}, {g}, {b}, {a});
     border: 1px solid rgba(120, 140, 255, 160);
     border-radius: 10px;
-}
-QLabel#title {
+}}
+QLabel#title {{
     color: #9eb0ff;
     font-size: 11px;
     font-weight: 600;
-}
-QLabel#source {
-    color: #c8c8d8;
-    font-size: 13px;
-}
-QLabel#translation {
-    color: #ffffff;
-    font-weight: 600;
-}
-QPushButton#overlayBtn {
-    background-color: rgba(80, 90, 160, 180);
-    color: white;
-    border: none;
-    border-radius: 4px;
-    padding: 2px 8px;
-    font-size: 11px;
-}
-QPushButton#overlayBtn:hover {
-    background-color: rgba(100, 110, 200, 220);
-}
+}}
+QLabel#source {{
+    color: {source_color};
+}}
+QLabel#translation {{
+    color: {translation_color};
+}}
 """
+
+
+# Default static style (tests / fallback)
+OVERLAY_PANEL_STYLE = overlay_panel_style()

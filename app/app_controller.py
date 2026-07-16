@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 from copy import deepcopy
+import threading
 
-from PySide6.QtCore import QObject, QTimer
-from PySide6.QtGui import QAction
+from PySide6.QtCore import QObject, QTimer, Signal
+from PySide6.QtGui import QAction, QGuiApplication
 from PySide6.QtWidgets import QApplication, QSystemTrayIcon, QMenu, QStyle
 
 from app.capture.monitor import RegionMonitor
@@ -17,20 +18,27 @@ from app.capture.windows import (
 )
 from app.config import AppConfig, load_config, save_config
 from app.hotkeys.global_hotkey import GlobalHotkeyFilter
+from app.i18n import set_language, tr
+from app.obs.server import ObsSubtitleServer
 from app.pipeline import PipelineResult, TranslationPipeline
+from app.translate.llm_translator import list_models
 from app.ui.main_window import MainWindow
 from app.ui.overlay_window import OverlayWindow
 from app.ui.region_selector import RegionSelector
 
 
 class AppController(QObject):
+    _models_result = Signal(object, str)  # list[str] | None, error
+
     def __init__(self, app: QApplication) -> None:
         super().__init__()
         self.app = app
         self.cfg = load_config()
+        set_language(getattr(self.cfg, "ui_language", "zh-Hant") or "zh-Hant")
         self._capturing = False
         self._overlay_was_visible = True
         self._pending_force = True
+        self._models_fetching = False
 
         self.main = MainWindow(self.cfg)
         self.overlay = OverlayWindow()
@@ -38,6 +46,7 @@ class AppController(QObject):
         self.pipeline = TranslationPipeline()
         self.monitor = RegionMonitor()
         self.hotkey = GlobalHotkeyFilter(self)
+        self.obs = ObsSubtitleServer()
 
         self._setup_tray()
         self._connect()
@@ -56,6 +65,7 @@ class AppController(QObject):
             self.cfg.overlay_w,
             self.cfg.overlay_h,
         )
+        self.overlay.retranslate()
         self.overlay.show()
         self.main.show()
 
@@ -65,23 +75,32 @@ class AppController(QObject):
         self.tray.setIcon(icon)
         self.tray.setToolTip("GalMaster")
         menu = QMenu()
-        act_show = QAction("顯示主視窗", self)
-        act_show.triggered.connect(self.main.show)
-        act_show.triggered.connect(self.main.raise_)
-        self._tray_overlay_action = QAction("隱藏 Overlay", self)
+        self._tray_show_action = QAction(tr("tray.show_main"), self)
+        self._tray_show_action.triggered.connect(self.main.show)
+        self._tray_show_action.triggered.connect(self.main.raise_)
+        self._tray_overlay_action = QAction(tr("tray.overlay_hide"), self)
         self._tray_overlay_action.triggered.connect(self.toggle_overlay)
-        act_translate = QAction("立即翻譯", self)
-        act_translate.triggered.connect(lambda: self.translate_now(force=True))
-        act_quit = QAction("結束", self)
-        act_quit.triggered.connect(self.shutdown)
-        menu.addAction(act_show)
+        self._tray_translate_action = QAction(tr("tray.translate"), self)
+        self._tray_translate_action.triggered.connect(lambda: self.translate_now(force=True))
+        self._tray_quit_action = QAction(tr("tray.quit"), self)
+        self._tray_quit_action.triggered.connect(self.shutdown)
+        menu.addAction(self._tray_show_action)
         menu.addAction(self._tray_overlay_action)
-        menu.addAction(act_translate)
+        menu.addAction(self._tray_translate_action)
         menu.addSeparator()
-        menu.addAction(act_quit)
+        menu.addAction(self._tray_quit_action)
         self.tray.setContextMenu(menu)
         self.tray.activated.connect(self._on_tray_activated)
         self.tray.show()
+
+    def _retranslate_tray(self) -> None:
+        if hasattr(self, "_tray_show_action"):
+            self._tray_show_action.setText(tr("tray.show_main"))
+        if hasattr(self, "_tray_translate_action"):
+            self._tray_translate_action.setText(tr("tray.translate"))
+        if hasattr(self, "_tray_quit_action"):
+            self._tray_quit_action.setText(tr("tray.quit"))
+        self._on_overlay_visibility(self.overlay.isVisible())
 
     def _connect(self) -> None:
         self.main.select_region_clicked.connect(self.start_region_select)
@@ -95,6 +114,9 @@ class AppController(QObject):
         self.main.toggle_overlay_clicked.connect(self.toggle_overlay)
         self.main.clear_cache_clicked.connect(self.pipeline.clear_cache)
         self.main.exit_requested.connect(self.shutdown)
+        self.main.copy_obs_url_clicked.connect(self._copy_obs_url)
+        self.main.refresh_models_clicked.connect(self.refresh_models)
+        self._models_result.connect(self._on_models_result)
 
         self.selector.region_selected.connect(self.on_region_selected)
         self.selector.cancelled.connect(self.on_region_cancelled)
@@ -102,6 +124,7 @@ class AppController(QObject):
         self.pipeline.progress.connect(self.on_progress)
         self.pipeline.finished.connect(self.on_pipeline_finished)
         self.pipeline.busy_changed.connect(self._on_pipeline_busy)
+        self.pipeline.preview_ready.connect(self.on_preview_ready)
 
         # Auto-monitor: do not force (skip unchanged text; status only)
         self.monitor.region_changed.connect(lambda: self.translate_now(force=False))
@@ -130,7 +153,7 @@ class AppController(QObject):
         self.main.set_overlay_button_state(visible)
         if hasattr(self, "_tray_overlay_action") and self._tray_overlay_action is not None:
             self._tray_overlay_action.setText(
-                "隱藏 Overlay" if visible else "顯示 Overlay"
+                tr("tray.overlay_hide") if visible else tr("tray.overlay_show")
             )
 
     def _on_overlay_closed(self) -> None:
@@ -259,9 +282,12 @@ class AppController(QObject):
         register_hotkey: bool = False,
         old_auto: bool | None = None,
     ) -> None:
+        set_language(getattr(cfg, "ui_language", "zh-Hant") or "zh-Hant")
         self.overlay.set_opacity_level(cfg.overlay_opacity)
-        self.overlay.apply_font_size(cfg.overlay_font_size)
+        self.overlay.apply_style(cfg)
         self.overlay.set_click_through(cfg.overlay_click_through)
+        self.overlay.retranslate()
+        self._retranslate_tray()
         if register_hotkey:
             self._register_hotkey()
         if self.monitor.is_running:
@@ -279,6 +305,7 @@ class AppController(QObject):
         elif not cfg.auto_monitor and self.monitor.is_running:
             self.monitor.stop()
         self.main.set_monitor_running(self.monitor.is_running)
+        self._sync_obs_server(cfg)
 
     def on_auto_monitor(self, enabled: bool) -> None:
         # Immediate operational toggle via top-bar Start/Stop; mark dirty so Save persists
@@ -293,6 +320,7 @@ class AppController(QObject):
             self.cfg.monitor_stable_ms = draft.monitor_stable_ms
             self.cfg.monitor_wait_stable = draft.monitor_stable_ms > 0
             self.cfg.monitor_interval_ms = draft.monitor_interval_ms
+            self.cfg.monitor_cooldown_ms = draft.monitor_cooldown_ms
             self.cfg.monitor_diff_threshold = draft.monitor_diff_threshold
             self.pipeline.reset_dedupe()
             self.monitor.start(self.cfg)
@@ -411,6 +439,101 @@ class AppController(QObject):
 
         self.pipeline.request(self.cfg, img, force=force)
 
+    def on_preview_ready(self, img: object) -> None:
+        try:
+            self.main.set_preview_image(img)  # type: ignore[arg-type]
+        except Exception:
+            pass
+
+    def _sync_obs_server(self, cfg: AppConfig) -> None:
+        self.obs.configure(
+            show_source=bool(getattr(cfg, "obs_show_source", False)),
+            show_translation=bool(getattr(cfg, "obs_show_translation", True)),
+            font_family=str(getattr(cfg, "obs_font_family", "") or ""),
+            source_font_size=int(getattr(cfg, "obs_source_font_size", 20) or 20),
+            translation_font_size=int(
+                getattr(
+                    cfg,
+                    "obs_translation_font_size",
+                    getattr(cfg, "obs_font_size", 28),
+                )
+                or 28
+            ),
+            source_color=str(getattr(cfg, "obs_source_color", "#d8d8e0") or "#d8d8e0"),
+            translation_color=str(
+                getattr(cfg, "obs_translation_color", "#ffffff") or "#ffffff"
+            ),
+            translation_bold=bool(getattr(cfg, "obs_translation_bold", True)),
+            text_align=str(getattr(cfg, "obs_text_align", "left") or "left"),
+            bg_color=str(getattr(cfg, "obs_bg_color", "#000000") or "#000000"),
+            bg_alpha=int(getattr(cfg, "obs_bg_alpha", 140) or 140),
+        )
+        if getattr(cfg, "obs_enabled", False):
+            port = int(getattr(cfg, "obs_port", 8765) or 8765)
+            self.obs.start(port)
+            if self.obs.running:
+                self.main.set_obs_status(running=True, url=self.obs.url())
+            else:
+                self.main.set_obs_status(
+                    running=False, error=self.obs.last_error or "bind failed"
+                )
+        else:
+            self.obs.stop()
+            self.main.set_obs_status(running=False)
+
+    def _copy_obs_url(self) -> None:
+        url = self.main.obs_url()
+        QGuiApplication.clipboard().setText(url)
+        self.main.set_status(tr("obs.copied"), busy=False)
+
+    def refresh_models(self) -> None:
+        """Fetch GET /models using current form API settings (background thread)."""
+        if self._models_fetching:
+            return
+        draft = self.main.collect_config()
+        if not (draft.api_key or "").strip():
+            self.main.set_models_status(tr("models.need_key"))
+            self.main.set_status(tr("models.need_key"), busy=False)
+            return
+        if not (draft.base_url or "").strip():
+            self.main.set_models_status(tr("models.need_url"))
+            return
+
+        self._models_fetching = True
+        self.main.set_models_refreshing(True)
+        api_key = draft.api_key
+        base_url = draft.base_url
+        protocol = draft.api_protocol or "openai"
+        anthropic_version = draft.anthropic_version or "2023-06-01"
+
+        def work() -> None:
+            try:
+                ids = list_models(
+                    api_key=api_key,
+                    base_url=base_url,
+                    protocol=protocol,
+                    anthropic_version=anthropic_version,
+                )
+                self._models_result.emit(ids, "")
+            except Exception as exc:
+                self._models_result.emit(None, str(exc))
+
+        threading.Thread(target=work, name="list-models", daemon=True).start()
+
+    def _on_models_result(self, models: object, error: str) -> None:
+        self._models_fetching = False
+        self.main.set_models_refreshing(False)
+        if error or models is None:
+            msg = tr("models.failed", err=error or "unknown")
+            self.main.set_models_status(msg)
+            self.main.set_status(msg, busy=False)
+            return
+        assert isinstance(models, list)
+        self.main.set_models_list(models, keep_current=True)
+        msg = tr("models.ok", n=len(models))
+        self.main.set_models_status(msg)
+        self.main.set_status(msg, busy=False)
+
     def on_monitor_status(self, msg: str) -> None:
         if self.pipeline.busy:
             return
@@ -451,6 +574,7 @@ class AppController(QObject):
             self.main.set_status(result.error, busy=False)
             self.main.set_result_text(result.error)
             self.overlay.set_content(translation=result.error, status="錯誤")
+            # Do not overwrite OBS subtitle on hard errors
             return
         if result.error and result.source_text and not result.translated_text:
             self.main.set_status(result.error, busy=False)
@@ -473,6 +597,11 @@ class AppController(QObject):
                 translation=result.source_text,
                 status="僅 OCR（未設定 LLM）",
             )
+            self.obs.publish(
+                source=result.source_text,
+                translation=result.source_text,
+                status="ocr_only",
+            )
             return
 
         cache_tag = "（快取）" if result.from_cache else ""
@@ -486,6 +615,11 @@ class AppController(QObject):
             source=result.source_text,
             translation=result.translated_text,
             status="完成" + cache_tag,
+        )
+        self.obs.publish(
+            source=result.source_text,
+            translation=result.translated_text,
+            status="ok" + ("_cache" if result.from_cache else ""),
         )
 
     def persist(self) -> None:
@@ -517,6 +651,10 @@ class AppController(QObject):
             pass
         try:
             self.pipeline.shutdown()
+        except Exception:
+            pass
+        try:
+            self.obs.stop()
         except Exception:
             pass
         self.tray.hide()

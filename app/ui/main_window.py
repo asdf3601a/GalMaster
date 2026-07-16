@@ -4,10 +4,12 @@ from __future__ import annotations
 
 from copy import deepcopy
 
+from PIL import Image
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QGuiApplication
+from PySide6.QtGui import QFont, QGuiApplication, QImage, QPixmap
 from PySide6.QtWidgets import (
     QCheckBox,
+    QComboBox,
     QFormLayout,
     QFrame,
     QGroupBox,
@@ -25,11 +27,30 @@ from PySide6.QtWidgets import (
 )
 
 from app.capture.windows import WindowInfo
-from app.config import LANGUAGE_CHOICES, AppConfig
+from app.config import LANGUAGE_CHOICES, AppConfig, normalize_hex_color
+from app.i18n import available_languages, set_language, tr
 from app.ocr.base import DEFAULT_OCR_ENGINE, normalize_ocr_engine
 from app.translate.providers import PROVIDER_PRESETS, get_preset
 from app.ui.styles import MAIN_STYLE
-from app.ui.widgets import NoWheelComboBox, NoWheelDoubleSpinBox, NoWheelSpinBox
+from app.ui.widgets import (
+    ColorButton,
+    NoWheelComboBox,
+    NoWheelDoubleSpinBox,
+    NoWheelFontComboBox,
+    NoWheelSpinBox,
+)
+
+
+def _optional_float_row(
+    *,
+    enabled: bool,
+    spin: NoWheelDoubleSpinBox,
+) -> float | None:
+    return float(spin.value()) if enabled else None
+
+
+def _optional_int_row(*, enabled: bool, spin: NoWheelSpinBox) -> int | None:
+    return int(spin.value()) if enabled else None
 
 
 class MainWindow(QMainWindow):
@@ -45,10 +66,13 @@ class MainWindow(QMainWindow):
     clear_cache_clicked = Signal()
     exit_requested = Signal()
     hide_to_tray_requested = Signal()
+    copy_obs_url_clicked = Signal()
+    refresh_models_clicked = Signal()
 
     def __init__(self, cfg: AppConfig) -> None:
         super().__init__()
-        self.setWindowTitle("GalMaster")
+        set_language(getattr(cfg, "ui_language", "zh-Hant") or "zh-Hant")
+        self.setWindowTitle(tr("app.title"))
         self.setStyleSheet(MAIN_STYLE)
         self._cfg = deepcopy(cfg)  # last applied snapshot
         self._windows: list[WindowInfo] = []
@@ -57,6 +81,13 @@ class MainWindow(QMainWindow):
         self._loading_ui = False
         self._dirty = False
         self._monitor_running = bool(cfg.auto_monitor)
+        self._overlay_visible = True
+        self._obs_status_key = "off"  # off | on | err
+        self._obs_status_url = ""
+        self._obs_status_err = ""
+
+        # form-row label widgets kept for retranslate
+        self._form_labels: dict[str, QLabel] = {}
 
         central = QWidget()
         outer = QVBoxLayout(central)
@@ -81,6 +112,7 @@ class MainWindow(QMainWindow):
         root.addWidget(self._build_lang_group(cfg))
         root.addWidget(self._build_llm_group(cfg))
         root.addWidget(self._build_display_group(cfg))
+        root.addWidget(self._build_obs_group(cfg))
         root.addWidget(self._build_result_group())
         root.addWidget(self._build_footer())
         root.addStretch(0)
@@ -89,10 +121,12 @@ class MainWindow(QMainWindow):
         outer.addWidget(scroll, 1)
         self.setCentralWidget(central)
 
-        self.statusBar().showMessage("就緒 — 框選區域後按熱鍵翻譯")
+        self.statusBar().showMessage(tr("status.ready"))
         self._apply_window_geometry(cfg)
         self._set_monitor_buttons(self._monitor_running)
         self._set_dirty(False)
+        self._on_pipeline_mode_changed()
+        self.retranslate()
 
     # ------------------------------------------------------------------ top bar
 
@@ -103,7 +137,7 @@ class MainWindow(QMainWindow):
         col.setContentsMargins(0, 0, 0, 4)
         col.setSpacing(6)
 
-        self.work_status = QLabel("就緒 — 框選區域後按熱鍵翻譯")
+        self.work_status = QLabel(tr("status.ready"))
         self.work_status.setObjectName("workStatus")
         self.work_status.setWordWrap(True)
         self.work_status.setProperty("busy", "false")
@@ -112,30 +146,25 @@ class MainWindow(QMainWindow):
         row = QHBoxLayout()
         row.setSpacing(6)
 
-        self.btn_start_monitor = QPushButton("開始監控")
-        self.btn_start_monitor.setToolTip("開始自動監控（畫面變化時翻譯）")
+        self.btn_start_monitor = QPushButton()
         self.btn_start_monitor.clicked.connect(lambda: self.auto_monitor_toggled.emit(True))
 
-        self.btn_stop_monitor = QPushButton("停止監控")
+        self.btn_stop_monitor = QPushButton()
         self.btn_stop_monitor.setObjectName("secondary")
-        self.btn_stop_monitor.setToolTip("停止自動監控")
         self.btn_stop_monitor.clicked.connect(lambda: self.auto_monitor_toggled.emit(False))
 
-        self.settings_hint = QLabel("修改後請套用或儲存")
+        self.settings_hint = QLabel()
         self.settings_hint.setObjectName("hint")
 
-        self.btn_apply = QPushButton("套用")
+        self.btn_apply = QPushButton()
         self.btn_apply.setObjectName("secondary")
-        self.btn_apply.setToolTip("套用到執行中程式（不寫入檔案）")
         self.btn_apply.clicked.connect(self.apply_settings_clicked.emit)
 
-        self.btn_save = QPushButton("儲存")
-        self.btn_save.setToolTip("套用並寫入 config.json")
+        self.btn_save = QPushButton()
         self.btn_save.clicked.connect(self.save_settings_clicked.emit)
 
-        self.btn_cancel = QPushButton("取消")
+        self.btn_cancel = QPushButton()
         self.btn_cancel.setObjectName("secondary")
-        self.btn_cancel.setToolTip("還原為上次套用／儲存的設定")
         self.btn_cancel.clicked.connect(self.cancel_settings_clicked.emit)
 
         row.addWidget(self.btn_start_monitor)
@@ -158,9 +187,14 @@ class MainWindow(QMainWindow):
 
     # ------------------------------------------------------------------ builders
 
+    def _add_form_label(self, form: QFormLayout, key: str, field: QWidget) -> None:
+        lab = QLabel()
+        self._form_labels[key] = lab
+        form.addRow(lab, field)
+
     def _build_capture_group(self, cfg: AppConfig) -> QGroupBox:
-        cap = QGroupBox("擷取")
-        cap_l = QVBoxLayout(cap)
+        self.cap_group = QGroupBox()
+        cap_l = QVBoxLayout(self.cap_group)
         cap_l.setSpacing(6)
 
         row = QHBoxLayout()
@@ -170,17 +204,17 @@ class MainWindow(QMainWindow):
         )
         self.window_combo.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         row.addWidget(self.window_combo, 1)
-        self.btn_refresh = QPushButton("重新整理")
+        self.btn_refresh = QPushButton()
         self.btn_refresh.setObjectName("secondary")
         self.btn_refresh.clicked.connect(self._on_refresh)
         row.addWidget(self.btn_refresh)
         cap_l.addLayout(row)
 
         row2 = QHBoxLayout()
-        self.btn_region = QPushButton("框選 OCR 區域")
+        self.btn_region = QPushButton()
         self.btn_region.clicked.connect(self.select_region_clicked.emit)
         row2.addWidget(self.btn_region)
-        self.btn_translate = QPushButton("立即翻譯")
+        self.btn_translate = QPushButton()
         self.btn_translate.clicked.connect(self.translate_now_clicked.emit)
         row2.addWidget(self.btn_translate)
         cap_l.addLayout(row2)
@@ -190,6 +224,22 @@ class MainWindow(QMainWindow):
         self.region_label.setWordWrap(True)
         self._update_region_label()
         cap_l.addWidget(self.region_label)
+
+        mode_row = QHBoxLayout()
+        self.lbl_pipeline_mode = QLabel()
+        self.pipeline_mode_combo = NoWheelComboBox()
+        self.pipeline_mode_combo.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.pipeline_mode_combo.addItem("", "ocr")
+        self.pipeline_mode_combo.addItem("", "vlm")
+        self._set_combo(
+            self.pipeline_mode_combo,
+            (getattr(cfg, "pipeline_mode", "ocr") or "ocr"),
+        )
+        self.pipeline_mode_combo.currentIndexChanged.connect(self._mark_dirty)
+        self.pipeline_mode_combo.currentIndexChanged.connect(self._on_pipeline_mode_changed)
+        mode_row.addWidget(self.lbl_pipeline_mode)
+        mode_row.addWidget(self.pipeline_mode_combo, 1)
+        cap_l.addLayout(mode_row)
 
         mon = QFormLayout()
         mon.setSpacing(6)
@@ -206,13 +256,8 @@ class MainWindow(QMainWindow):
         if not getattr(cfg, "monitor_wait_stable", True):
             stable_ms = 0
         self.stable_ms_spin.setValue(max(0, stable_ms))
-        self.stable_ms_spin.setToolTip(
-            "畫面安靜（低於變化閾值）持續多久後才開始 OCR。\n"
-            "0 = 偵測到變化立即 OCR（不等待穩定）。\n"
-            "台詞淡入較慢可調高（例如 1000–2000 ms）。"
-        )
         self.stable_ms_spin.valueChanged.connect(self._mark_dirty)
-        mon.addRow("穩定時間", self.stable_ms_spin)
+        self._add_form_label(mon, "label.stable_ms", self.stable_ms_spin)
 
         self.interval_spin = NoWheelSpinBox()
         self.interval_spin.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
@@ -220,12 +265,17 @@ class MainWindow(QMainWindow):
         self.interval_spin.setSingleStep(50)
         self.interval_spin.setSuffix(" ms")
         self.interval_spin.setValue(int(cfg.monitor_interval_ms or 0))
-        self.interval_spin.setToolTip(
-            "輪詢畫面的間隔。\n"
-            "0 = 使用預設 600 ms；實際下限約 200 ms。"
-        )
         self.interval_spin.valueChanged.connect(self._mark_dirty)
-        mon.addRow("間隔", self.interval_spin)
+        self._add_form_label(mon, "label.interval", self.interval_spin)
+
+        self.cooldown_spin = NoWheelSpinBox()
+        self.cooldown_spin.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.cooldown_spin.setRange(0, 30000)
+        self.cooldown_spin.setSingleStep(100)
+        self.cooldown_spin.setSuffix(" ms")
+        self.cooldown_spin.setValue(int(getattr(cfg, "monitor_cooldown_ms", 1200) or 0))
+        self.cooldown_spin.valueChanged.connect(self._mark_dirty)
+        self._add_form_label(mon, "label.cooldown", self.cooldown_spin)
 
         self.threshold_spin = NoWheelDoubleSpinBox()
         self.threshold_spin.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
@@ -233,21 +283,32 @@ class MainWindow(QMainWindow):
         self.threshold_spin.setSingleStep(0.005)
         self.threshold_spin.setDecimals(3)
         self.threshold_spin.setValue(float(cfg.monitor_diff_threshold))
-        self.threshold_spin.setToolTip(
-            "畫面差異超過此值視為「有變化」。\n"
-            "0 = 極敏感（使用最小門檻，僅在有實際像素差異時觸發）。"
-        )
         self.threshold_spin.valueChanged.connect(self._mark_dirty)
-        mon.addRow("變化閾值", self.threshold_spin)
+        self._add_form_label(mon, "label.threshold", self.threshold_spin)
 
         cap_l.addLayout(mon)
 
+        self.lbl_preview = QLabel()
+        self.lbl_preview.setObjectName("hint")
+        cap_l.addWidget(self.lbl_preview)
+
+        self.preview_label = QLabel()
+        self.preview_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.preview_label.setMinimumHeight(120)
+        self.preview_label.setMaximumHeight(160)
+        self.preview_label.setStyleSheet(
+            "QLabel { background: #1a1a22; border: 1px solid #333; border-radius: 6px; color: #888; }"
+        )
+        self.preview_label.setText(tr("hint.preview_empty"))
+        self.preview_label.setScaledContents(False)
+        cap_l.addWidget(self.preview_label)
+
         self.window_combo.currentIndexChanged.connect(self._on_window_selected)
-        return cap
+        return self.cap_group
 
     def _build_lang_group(self, cfg: AppConfig) -> QGroupBox:
-        lang = QGroupBox("語言")
-        row = QHBoxLayout(lang)
+        self.lang_group = QGroupBox()
+        row = QHBoxLayout(self.lang_group)
         self.source_combo = NoWheelComboBox()
         self.target_combo = NoWheelComboBox()
         self.source_combo.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
@@ -260,20 +321,80 @@ class MainWindow(QMainWindow):
         self._set_combo(self.target_combo, cfg.target_lang)
         self.source_combo.currentIndexChanged.connect(self._mark_dirty)
         self.target_combo.currentIndexChanged.connect(self._mark_dirty)
-        row.addWidget(QLabel("來源"))
+        self.lbl_source = QLabel()
+        self.lbl_target = QLabel()
+        row.addWidget(self.lbl_source)
         row.addWidget(self.source_combo, 1)
         row.addWidget(QLabel("→"))
-        row.addWidget(QLabel("目標"))
+        row.addWidget(self.lbl_target)
         row.addWidget(self.target_combo, 1)
-        return lang
+        return self.lang_group
+
+    def _make_optional_float(
+        self,
+        *,
+        minimum: float,
+        maximum: float,
+        step: float,
+        decimals: int,
+        default: float,
+        enabled: bool,
+    ) -> tuple[QCheckBox, NoWheelDoubleSpinBox, QWidget]:
+        wrap = QWidget()
+        row = QHBoxLayout(wrap)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(6)
+        chk = QCheckBox()
+        spin = NoWheelDoubleSpinBox()
+        spin.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        spin.setRange(minimum, maximum)
+        spin.setSingleStep(step)
+        spin.setDecimals(decimals)
+        spin.setValue(default)
+        spin.setEnabled(enabled)
+        chk.setChecked(enabled)
+        chk.toggled.connect(spin.setEnabled)
+        chk.toggled.connect(self._mark_dirty)
+        spin.valueChanged.connect(self._mark_dirty)
+        row.addWidget(chk)
+        row.addWidget(spin, 1)
+        return chk, spin, wrap
+
+    def _make_optional_int(
+        self,
+        *,
+        minimum: int,
+        maximum: int,
+        step: int,
+        default: int,
+        enabled: bool,
+    ) -> tuple[QCheckBox, NoWheelSpinBox, QWidget]:
+        wrap = QWidget()
+        row = QHBoxLayout(wrap)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(6)
+        chk = QCheckBox()
+        spin = NoWheelSpinBox()
+        spin.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        spin.setRange(minimum, maximum)
+        spin.setSingleStep(step)
+        spin.setValue(default)
+        spin.setEnabled(enabled)
+        chk.setChecked(enabled)
+        chk.toggled.connect(spin.setEnabled)
+        chk.toggled.connect(self._mark_dirty)
+        spin.valueChanged.connect(self._mark_dirty)
+        row.addWidget(chk)
+        row.addWidget(spin, 1)
+        return chk, spin, wrap
 
     def _build_llm_group(self, cfg: AppConfig) -> QGroupBox:
-        llm = QGroupBox("LLM API（可選）")
-        form = QFormLayout(llm)
+        self.llm_group = QGroupBox()
+        form = QFormLayout(self.llm_group)
         form.setSpacing(6)
         form.setContentsMargins(8, 10, 8, 8)
 
-        self.llm_optional_hint = QLabel("未填 API Key 時只做 OCR，不呼叫翻譯。")
+        self.llm_optional_hint = QLabel()
         self.llm_optional_hint.setObjectName("hint")
         self.llm_optional_hint.setWordWrap(True)
         form.addRow(self.llm_optional_hint)
@@ -291,146 +412,544 @@ class MainWindow(QMainWindow):
 
         self.api_key_edit = QLineEdit(cfg.api_key)
         self.api_key_edit.setEchoMode(QLineEdit.EchoMode.Password)
-        self.api_key_edit.setPlaceholderText("可選 — 留空 = 只 OCR")
         self.api_key_edit.textChanged.connect(self._mark_dirty)
 
         self.base_url_edit = QLineEdit(cfg.base_url)
         self.base_url_edit.setPlaceholderText("https://…")
         self.base_url_edit.textChanged.connect(self._mark_dirty)
 
-        self.model_edit = QLineEdit(cfg.model)
-        self.model_edit.textChanged.connect(self._mark_dirty)
+        # Editable combo: dropdown when GET /models succeeds; always allow typing.
+        self.model_combo = NoWheelComboBox()
+        self.model_combo.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.model_combo.setEditable(True)
+        self.model_combo.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
+        self.model_combo.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
+        )
+        if self.model_combo.lineEdit() is not None:
+            self.model_combo.lineEdit().setText(cfg.model or "")
+            self.model_combo.lineEdit().textChanged.connect(self._mark_dirty)
+        self.model_combo.currentIndexChanged.connect(self._on_model_combo_changed)
+        self._model_ids: list[str] = []
+
+        self.btn_refresh_models = QPushButton()
+        self.btn_refresh_models.setObjectName("secondary")
+        self.btn_refresh_models.clicked.connect(self.refresh_models_clicked.emit)
+
+        model_row = QHBoxLayout()
+        model_row.setContentsMargins(0, 0, 0, 0)
+        model_row.setSpacing(6)
+        model_row.addWidget(self.model_combo, 1)
+        model_row.addWidget(self.btn_refresh_models)
+        self.model_row_wrap = QWidget()
+        self.model_row_wrap.setLayout(model_row)
+
+        self.models_status_label = QLabel("")
+        self.models_status_label.setObjectName("hint")
+        self.models_status_label.setWordWrap(True)
 
         self.prompt_edit = QLineEdit(cfg.custom_prompt)
-        self.prompt_edit.setPlaceholderText("可選：額外翻譯指示")
         self.prompt_edit.textChanged.connect(self._mark_dirty)
 
-        form.addRow("服務預設", self.provider_combo)
+        self._add_form_label(form, "label.provider", self.provider_combo)
         form.addRow("", self.api_meta_label)
-        form.addRow("API Key", self.api_key_edit)
-        form.addRow("Base URL", self.base_url_edit)
-        form.addRow("Model", self.model_edit)
-        form.addRow("補充指示", self.prompt_edit)
+        self._add_form_label(form, "label.api_key", self.api_key_edit)
+        self._add_form_label(form, "label.base_url", self.base_url_edit)
+        self._add_form_label(form, "label.model", self.model_row_wrap)
+        form.addRow("", self.models_status_label)
+        self._add_form_label(form, "label.custom_prompt", self.prompt_edit)
 
         self.context_spin = NoWheelSpinBox()
         self.context_spin.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.context_spin.setRange(0, 20)
         self.context_spin.setValue(int(getattr(cfg, "context_history_size", 3) or 0))
-        self.context_spin.setToolTip(
-            "翻譯時帶入最近幾則 OCR/譯文作為上下文（sliding window）。\n"
-            "0 = 只翻當前這句；3–5 適合角色名／代名詞連貫。"
-        )
         self.context_spin.valueChanged.connect(self._mark_dirty)
-        form.addRow("上下文則數", self.context_spin)
+        self._add_form_label(form, "label.context", self.context_spin)
+
+        self.max_tokens_spin = NoWheelSpinBox()
+        self.max_tokens_spin.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.max_tokens_spin.setRange(64, 128000)
+        self.max_tokens_spin.setSingleStep(256)
+        self.max_tokens_spin.setValue(int(getattr(cfg, "max_tokens", 2048) or 2048))
+        self.max_tokens_spin.valueChanged.connect(self._mark_dirty)
+        self._add_form_label(form, "label.max_tokens", self.max_tokens_spin)
+
+        # Advanced optional sampling
+        self.adv_group = QGroupBox()
+        self.adv_group.setCheckable(False)
+        adv = QFormLayout(self.adv_group)
+        adv.setSpacing(4)
+
+        temp_v = getattr(cfg, "temperature", None)
+        self.temp_chk, self.temp_spin, temp_w = self._make_optional_float(
+            minimum=0.0,
+            maximum=2.0,
+            step=0.05,
+            decimals=2,
+            default=float(temp_v) if temp_v is not None else 0.2,
+            enabled=temp_v is not None,
+        )
+        self._add_form_label(adv, "label.temperature", temp_w)
+
+        topp_v = getattr(cfg, "top_p", None)
+        self.topp_chk, self.topp_spin, topp_w = self._make_optional_float(
+            minimum=0.0,
+            maximum=1.0,
+            step=0.05,
+            decimals=2,
+            default=float(topp_v) if topp_v is not None else 1.0,
+            enabled=topp_v is not None,
+        )
+        self._add_form_label(adv, "label.top_p", topp_w)
+
+        topk_v = getattr(cfg, "top_k", None)
+        self.topk_chk, self.topk_spin, topk_w = self._make_optional_int(
+            minimum=1,
+            maximum=200,
+            step=1,
+            default=int(topk_v) if topk_v is not None else 40,
+            enabled=topk_v is not None and int(topk_v) > 0,
+        )
+        self._add_form_label(adv, "label.top_k", topk_w)
+
+        fp_v = getattr(cfg, "frequency_penalty", None)
+        self.fp_chk, self.fp_spin, fp_w = self._make_optional_float(
+            minimum=-2.0,
+            maximum=2.0,
+            step=0.1,
+            decimals=2,
+            default=float(fp_v) if fp_v is not None else 0.0,
+            enabled=fp_v is not None,
+        )
+        self._add_form_label(adv, "label.freq_penalty", fp_w)
+
+        pp_v = getattr(cfg, "presence_penalty", None)
+        self.pp_chk, self.pp_spin, pp_w = self._make_optional_float(
+            minimum=-2.0,
+            maximum=2.0,
+            step=0.1,
+            decimals=2,
+            default=float(pp_v) if pp_v is not None else 0.0,
+            enabled=pp_v is not None,
+        )
+        self._add_form_label(adv, "label.pres_penalty", pp_w)
+
+        seed_v = getattr(cfg, "seed", None)
+        self.seed_chk, self.seed_spin, seed_w = self._make_optional_int(
+            minimum=0,
+            maximum=2_147_483_647,
+            step=1,
+            default=int(seed_v) if seed_v is not None else 0,
+            enabled=seed_v is not None,
+        )
+        self._add_form_label(adv, "label.seed", seed_w)
+
+        self.reasoning_combo = NoWheelComboBox()
+        self.reasoning_combo.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        for code in ("", "none", "low", "medium", "high"):
+            self.reasoning_combo.addItem(code or "(omit)", code)
+        effort = (getattr(cfg, "reasoning_effort", "") or "").strip().lower()
+        self._set_combo(self.reasoning_combo, effort)
+        self.reasoning_combo.currentIndexChanged.connect(self._mark_dirty)
+        self._add_form_label(adv, "label.reasoning", self.reasoning_combo)
+
+        self.sampling_hint = QLabel()
+        self.sampling_hint.setObjectName("hint")
+        self.sampling_hint.setWordWrap(True)
+        adv.addRow(self.sampling_hint)
+
+        form.addRow(self.adv_group)
 
         self._sync_api_meta_from_provider(apply_defaults=False)
-        return llm
+        return self.llm_group
 
     def _build_display_group(self, cfg: AppConfig) -> QGroupBox:
-        ov = QGroupBox("顯示 / 熱鍵 / Overlay")
-        form = QFormLayout(ov)
+        self.display_group = QGroupBox()
+        form = QFormLayout(self.display_group)
         form.setSpacing(6)
+
+        self.ui_lang_combo = NoWheelComboBox()
+        self.ui_lang_combo.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        for code, name in available_languages():
+            self.ui_lang_combo.addItem(name, code)
+        self._set_combo(self.ui_lang_combo, getattr(cfg, "ui_language", "zh-Hant") or "zh-Hant")
+        self.ui_lang_combo.currentIndexChanged.connect(self._mark_dirty)
+        self._add_form_label(form, "label.ui_language", self.ui_lang_combo)
 
         self.hotkey_edit = QLineEdit(cfg.hotkey)
         self.hotkey_edit.textChanged.connect(self._mark_dirty)
 
         self.ocr_combo = NoWheelComboBox()
         self.ocr_combo.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
-        self.ocr_combo.addItem("OneOCR（剪取工具離線模型）", "oneocr")
-        self.ocr_combo.addItem("Manga OCR", "manga")
-        self.ocr_combo.addItem("RapidOCR", "rapid")
-        self.ocr_combo.addItem("PaddleOCR", "paddle")
+        for code in ("oneocr", "manga", "rapid", "paddle"):
+            self.ocr_combo.addItem(code, code)
         self._set_combo(
             self.ocr_combo, normalize_ocr_engine(cfg.ocr_engine or DEFAULT_OCR_ENGINE)
-        )
-        self.ocr_combo.setToolTip(
-            "OCR 引擎：\n"
-            "• OneOCR：剪取工具 oneocr.dll 離線模型（推薦，中日英）。\n"
-            "• Manga OCR：日文對白／遊戲字體友善。\n"
-            "• RapidOCR：ONNX 輕量多語。\n"
-            "• PaddleOCR：PP-OCR（較重，可選安裝）。\n"
-            "首次 OneOCR 會從已安裝的剪取工具複製模型到 tools/oneocr。"
         )
         self.ocr_combo.currentIndexChanged.connect(self._mark_dirty)
 
         row_hot = QHBoxLayout()
         row_hot.addWidget(self.hotkey_edit, 1)
-        row_hot.addWidget(QLabel("OCR"))
+        self.lbl_ocr_inline = QLabel()
+        row_hot.addWidget(self.lbl_ocr_inline)
         row_hot.addWidget(self.ocr_combo)
-        form.addRow("熱鍵", row_hot)
+        hot_wrap = QWidget()
+        hot_wrap.setLayout(row_hot)
+        self._add_form_label(form, "label.hotkey", hot_wrap)
 
-        ov_hint = QLabel(
-            "Overlay 僅顯示譯文；透明度／字級／穿透／顯示皆在此設定（套用後生效）。"
+        self.ov_hint = QLabel()
+        self.ov_hint.setObjectName("hint")
+        self.ov_hint.setWordWrap(True)
+        form.addRow(self.ov_hint)
+
+        # Content visibility
+        self.ov_show_source_check = QCheckBox()
+        self.ov_show_source_check.setChecked(
+            bool(getattr(cfg, "overlay_show_source", True))
         )
-        ov_hint.setObjectName("hint")
-        ov_hint.setWordWrap(True)
-        form.addRow(ov_hint)
+        self.ov_show_source_check.toggled.connect(self._mark_dirty)
+        self.ov_show_translation_check = QCheckBox()
+        self.ov_show_translation_check.setChecked(
+            bool(getattr(cfg, "overlay_show_translation", True))
+        )
+        self.ov_show_translation_check.toggled.connect(self._mark_dirty)
+        row_show = QHBoxLayout()
+        row_show.addWidget(self.ov_show_source_check)
+        row_show.addWidget(self.ov_show_translation_check)
+        row_show.addStretch(1)
+        show_wrap = QWidget()
+        show_wrap.setLayout(row_show)
+        form.addRow(show_wrap)
 
         self.opacity_spin = NoWheelDoubleSpinBox()
         self.opacity_spin.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.opacity_spin.setRange(0.3, 1.0)
         self.opacity_spin.setSingleStep(0.05)
         self.opacity_spin.setValue(cfg.overlay_opacity)
-        self.opacity_spin.setToolTip("Overlay 視窗不透明度")
         self.opacity_spin.valueChanged.connect(self._mark_dirty)
-        self.font_spin = NoWheelSpinBox()
-        self.font_spin.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
-        self.font_spin.setRange(10, 36)
-        self.font_spin.setValue(cfg.overlay_font_size)
-        self.font_spin.setToolTip("Overlay 譯文字級")
-        self.font_spin.valueChanged.connect(self._mark_dirty)
+
+        self.ov_font_combo = NoWheelFontComboBox()
+        self.ov_font_combo.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.ov_font_combo.setEditable(True)
+        fam = str(getattr(cfg, "overlay_font_family", "") or "")
+        if fam:
+            self.ov_font_combo.setCurrentFont(QFont(fam))
+        else:
+            self.ov_font_combo.setCurrentIndex(-1)
+            self.ov_font_combo.setEditText("")
+        self.ov_font_combo.currentFontChanged.connect(self._mark_dirty)
+        self.ov_font_combo.editTextChanged.connect(self._mark_dirty)
+
+        self.ov_src_font_spin = NoWheelSpinBox()
+        self.ov_src_font_spin.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.ov_src_font_spin.setRange(10, 48)
+        self.ov_src_font_spin.setValue(
+            int(getattr(cfg, "overlay_source_font_size", 14) or 14)
+        )
+        self.ov_src_font_spin.valueChanged.connect(self._mark_dirty)
+        self.ov_tr_font_spin = NoWheelSpinBox()
+        self.ov_tr_font_spin.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.ov_tr_font_spin.setRange(10, 48)
+        self.ov_tr_font_spin.setValue(
+            int(
+                getattr(
+                    cfg,
+                    "overlay_translation_font_size",
+                    getattr(cfg, "overlay_font_size", 16),
+                )
+                or 16
+            )
+        )
+        self.ov_tr_font_spin.valueChanged.connect(self._mark_dirty)
 
         row_ov = QHBoxLayout()
-        row_ov.addWidget(QLabel("透明度"))
+        self.lbl_opacity = QLabel()
+        row_ov.addWidget(self.lbl_opacity)
         row_ov.addWidget(self.opacity_spin)
-        row_ov.addWidget(QLabel("字級"))
-        row_ov.addWidget(self.font_spin)
         row_ov.addStretch(1)
-        form.addRow("Overlay 外觀", row_ov)
+        ov_wrap = QWidget()
+        ov_wrap.setLayout(row_ov)
+        self._add_form_label(form, "label.overlay_look", ov_wrap)
 
-        self.click_through_check = QCheckBox("滑鼠穿透（不擋遊戲點擊）")
-        self.click_through_check.setChecked(cfg.overlay_click_through)
-        self.click_through_check.setToolTip(
-            "開啟後滑鼠會穿過 Overlay（無法在其上拖曳）。\n"
-            "修改後請按「套用」或「儲存」。"
+        self._add_form_label(form, "label.font_family", self.ov_font_combo)
+
+        row_sz = QHBoxLayout()
+        self.lbl_ov_src_font = QLabel()
+        self.lbl_ov_tr_font = QLabel()
+        row_sz.addWidget(self.lbl_ov_src_font)
+        row_sz.addWidget(self.ov_src_font_spin)
+        row_sz.addWidget(self.lbl_ov_tr_font)
+        row_sz.addWidget(self.ov_tr_font_spin)
+        row_sz.addStretch(1)
+        sz_wrap = QWidget()
+        sz_wrap.setLayout(row_sz)
+        self._add_form_label(form, "label.font_sizes", sz_wrap)
+
+        self.ov_src_color_btn = ColorButton(
+            getattr(cfg, "overlay_source_color", "#c8c8d8")
         )
+        self.ov_src_color_btn.color_changed.connect(self._mark_dirty)
+        self.ov_tr_color_btn = ColorButton(
+            getattr(cfg, "overlay_translation_color", "#ffffff")
+        )
+        self.ov_tr_color_btn.color_changed.connect(self._mark_dirty)
+        row_col = QHBoxLayout()
+        self.lbl_ov_src_color = QLabel()
+        self.lbl_ov_tr_color = QLabel()
+        row_col.addWidget(self.lbl_ov_src_color)
+        row_col.addWidget(self.ov_src_color_btn)
+        row_col.addWidget(self.lbl_ov_tr_color)
+        row_col.addWidget(self.ov_tr_color_btn)
+        row_col.addStretch(1)
+        col_wrap = QWidget()
+        col_wrap.setLayout(row_col)
+        self._add_form_label(form, "label.colors", col_wrap)
+
+        self.ov_tr_bold_check = QCheckBox()
+        self.ov_tr_bold_check.setChecked(
+            bool(getattr(cfg, "overlay_translation_bold", True))
+        )
+        self.ov_tr_bold_check.toggled.connect(self._mark_dirty)
+
+        self.ov_align_combo = NoWheelComboBox()
+        self.ov_align_combo.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.ov_align_combo.addItem("", "left")
+        self.ov_align_combo.addItem("", "center")
+        self._set_combo(
+            self.ov_align_combo, getattr(cfg, "overlay_text_align", "left") or "left"
+        )
+        self.ov_align_combo.currentIndexChanged.connect(self._mark_dirty)
+
+        row_align = QHBoxLayout()
+        row_align.addWidget(self.ov_tr_bold_check)
+        row_align.addWidget(self.ov_align_combo)
+        row_align.addStretch(1)
+        align_wrap = QWidget()
+        align_wrap.setLayout(row_align)
+        form.addRow(align_wrap)
+
+        self.ov_bg_color_btn = ColorButton(getattr(cfg, "overlay_bg_color", "#14141c"))
+        self.ov_bg_color_btn.color_changed.connect(self._mark_dirty)
+        self.ov_bg_alpha_spin = NoWheelSpinBox()
+        self.ov_bg_alpha_spin.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.ov_bg_alpha_spin.setRange(0, 255)
+        self.ov_bg_alpha_spin.setValue(int(getattr(cfg, "overlay_bg_alpha", 210) or 210))
+        self.ov_bg_alpha_spin.valueChanged.connect(self._mark_dirty)
+        row_bg = QHBoxLayout()
+        self.lbl_ov_bg = QLabel()
+        self.lbl_ov_bg_alpha = QLabel()
+        row_bg.addWidget(self.lbl_ov_bg)
+        row_bg.addWidget(self.ov_bg_color_btn)
+        row_bg.addWidget(self.lbl_ov_bg_alpha)
+        row_bg.addWidget(self.ov_bg_alpha_spin)
+        row_bg.addStretch(1)
+        bg_wrap = QWidget()
+        bg_wrap.setLayout(row_bg)
+        self._add_form_label(form, "label.panel_bg", bg_wrap)
+
+        self.click_through_check = QCheckBox()
+        self.click_through_check.setChecked(cfg.overlay_click_through)
         self.click_through_check.toggled.connect(self._mark_dirty)
         form.addRow("", self.click_through_check)
 
         row_btn = QHBoxLayout()
-        self.btn_overlay = QPushButton("隱藏 Overlay")
+        self.btn_overlay = QPushButton()
         self.btn_overlay.setObjectName("secondary")
-        self.btn_overlay.setToolTip("顯示或隱藏翻譯 Overlay（僅在主程式操作）")
         self.btn_overlay.clicked.connect(self.toggle_overlay_clicked.emit)
-        self.btn_cache = QPushButton("清除快取")
+        self.btn_cache = QPushButton()
         self.btn_cache.setObjectName("secondary")
-        self.btn_cache.setToolTip(
-            "清除翻譯快取與對話上下文歷史。\n"
-            "快取會依原文＋上下文窗口產生金鑰；清除後下次會重新呼叫 LLM。"
-        )
         self.btn_cache.clicked.connect(self.clear_cache_clicked.emit)
         row_btn.addWidget(self.btn_overlay)
         row_btn.addWidget(self.btn_cache)
         form.addRow(row_btn)
-        return ov
+        return self.display_group
+
+    def _build_obs_group(self, cfg: AppConfig) -> QGroupBox:
+        self.obs_group = QGroupBox()
+        form = QFormLayout(self.obs_group)
+        form.setSpacing(6)
+
+        self.obs_hint = QLabel()
+        self.obs_hint.setObjectName("hint")
+        self.obs_hint.setWordWrap(True)
+        form.addRow(self.obs_hint)
+
+        self.obs_enabled_check = QCheckBox()
+        self.obs_enabled_check.setChecked(bool(getattr(cfg, "obs_enabled", False)))
+        self.obs_enabled_check.toggled.connect(self._mark_dirty)
+        form.addRow(self.obs_enabled_check)
+
+        self.obs_port_spin = NoWheelSpinBox()
+        self.obs_port_spin.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.obs_port_spin.setRange(1, 65535)
+        self.obs_port_spin.setValue(int(getattr(cfg, "obs_port", 8765) or 8765))
+        self.obs_port_spin.valueChanged.connect(self._mark_dirty)
+        self._add_form_label(form, "label.obs_port", self.obs_port_spin)
+
+        self.obs_show_source_check = QCheckBox()
+        self.obs_show_source_check.setChecked(bool(getattr(cfg, "obs_show_source", False)))
+        self.obs_show_source_check.toggled.connect(self._mark_dirty)
+        self.obs_show_translation_check = QCheckBox()
+        self.obs_show_translation_check.setChecked(
+            bool(getattr(cfg, "obs_show_translation", True))
+        )
+        self.obs_show_translation_check.toggled.connect(self._mark_dirty)
+        row_obs_show = QHBoxLayout()
+        row_obs_show.addWidget(self.obs_show_source_check)
+        row_obs_show.addWidget(self.obs_show_translation_check)
+        row_obs_show.addStretch(1)
+        obs_show_wrap = QWidget()
+        obs_show_wrap.setLayout(row_obs_show)
+        form.addRow(obs_show_wrap)
+
+        self.obs_font_combo = NoWheelFontComboBox()
+        self.obs_font_combo.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.obs_font_combo.setEditable(True)
+        ofam = str(getattr(cfg, "obs_font_family", "") or "")
+        if ofam:
+            self.obs_font_combo.setCurrentFont(QFont(ofam))
+        else:
+            self.obs_font_combo.setCurrentIndex(-1)
+            self.obs_font_combo.setEditText("")
+        self.obs_font_combo.currentFontChanged.connect(self._mark_dirty)
+        self.obs_font_combo.editTextChanged.connect(self._mark_dirty)
+        self._add_form_label(form, "label.font_family", self.obs_font_combo)
+
+        self.obs_src_font_spin = NoWheelSpinBox()
+        self.obs_src_font_spin.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.obs_src_font_spin.setRange(10, 96)
+        self.obs_src_font_spin.setValue(
+            int(getattr(cfg, "obs_source_font_size", 20) or 20)
+        )
+        self.obs_src_font_spin.valueChanged.connect(self._mark_dirty)
+        self.obs_tr_font_spin = NoWheelSpinBox()
+        self.obs_tr_font_spin.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.obs_tr_font_spin.setRange(10, 96)
+        self.obs_tr_font_spin.setValue(
+            int(
+                getattr(
+                    cfg,
+                    "obs_translation_font_size",
+                    getattr(cfg, "obs_font_size", 28),
+                )
+                or 28
+            )
+        )
+        self.obs_tr_font_spin.valueChanged.connect(self._mark_dirty)
+        row_obs_sz = QHBoxLayout()
+        self.lbl_obs_src_font = QLabel()
+        self.lbl_obs_tr_font = QLabel()
+        row_obs_sz.addWidget(self.lbl_obs_src_font)
+        row_obs_sz.addWidget(self.obs_src_font_spin)
+        row_obs_sz.addWidget(self.lbl_obs_tr_font)
+        row_obs_sz.addWidget(self.obs_tr_font_spin)
+        row_obs_sz.addStretch(1)
+        obs_sz_wrap = QWidget()
+        obs_sz_wrap.setLayout(row_obs_sz)
+        self._add_form_label(form, "label.font_sizes", obs_sz_wrap)
+
+        self.obs_src_color_btn = ColorButton(
+            getattr(cfg, "obs_source_color", "#d8d8e0")
+        )
+        self.obs_src_color_btn.color_changed.connect(self._mark_dirty)
+        self.obs_tr_color_btn = ColorButton(
+            getattr(cfg, "obs_translation_color", "#ffffff")
+        )
+        self.obs_tr_color_btn.color_changed.connect(self._mark_dirty)
+        row_obs_col = QHBoxLayout()
+        self.lbl_obs_src_color = QLabel()
+        self.lbl_obs_tr_color = QLabel()
+        row_obs_col.addWidget(self.lbl_obs_src_color)
+        row_obs_col.addWidget(self.obs_src_color_btn)
+        row_obs_col.addWidget(self.lbl_obs_tr_color)
+        row_obs_col.addWidget(self.obs_tr_color_btn)
+        row_obs_col.addStretch(1)
+        obs_col_wrap = QWidget()
+        obs_col_wrap.setLayout(row_obs_col)
+        self._add_form_label(form, "label.colors", obs_col_wrap)
+
+        self.obs_tr_bold_check = QCheckBox()
+        self.obs_tr_bold_check.setChecked(
+            bool(getattr(cfg, "obs_translation_bold", True))
+        )
+        self.obs_tr_bold_check.toggled.connect(self._mark_dirty)
+        self.obs_align_combo = NoWheelComboBox()
+        self.obs_align_combo.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.obs_align_combo.addItem("", "left")
+        self.obs_align_combo.addItem("", "center")
+        self._set_combo(
+            self.obs_align_combo, getattr(cfg, "obs_text_align", "left") or "left"
+        )
+        self.obs_align_combo.currentIndexChanged.connect(self._mark_dirty)
+        row_obs_align = QHBoxLayout()
+        row_obs_align.addWidget(self.obs_tr_bold_check)
+        row_obs_align.addWidget(self.obs_align_combo)
+        row_obs_align.addStretch(1)
+        obs_align_wrap = QWidget()
+        obs_align_wrap.setLayout(row_obs_align)
+        form.addRow(obs_align_wrap)
+
+        self.obs_bg_color_btn = ColorButton(getattr(cfg, "obs_bg_color", "#000000"))
+        self.obs_bg_color_btn.color_changed.connect(self._mark_dirty)
+        self.obs_bg_alpha_spin = NoWheelSpinBox()
+        self.obs_bg_alpha_spin.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.obs_bg_alpha_spin.setRange(0, 255)
+        self.obs_bg_alpha_spin.setValue(int(getattr(cfg, "obs_bg_alpha", 140) or 140))
+        self.obs_bg_alpha_spin.valueChanged.connect(self._mark_dirty)
+        row_obs_bg = QHBoxLayout()
+        self.lbl_obs_bg = QLabel()
+        self.lbl_obs_bg_alpha = QLabel()
+        row_obs_bg.addWidget(self.lbl_obs_bg)
+        row_obs_bg.addWidget(self.obs_bg_color_btn)
+        row_obs_bg.addWidget(self.lbl_obs_bg_alpha)
+        row_obs_bg.addWidget(self.obs_bg_alpha_spin)
+        row_obs_bg.addStretch(1)
+        obs_bg_wrap = QWidget()
+        obs_bg_wrap.setLayout(row_obs_bg)
+        self._add_form_label(form, "label.panel_bg", obs_bg_wrap)
+
+        url_row = QHBoxLayout()
+        self.obs_url_label = QLabel(f"http://127.0.0.1:{self.obs_port_spin.value()}/")
+        self.obs_url_label.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse
+        )
+        self.btn_copy_obs = QPushButton()
+        self.btn_copy_obs.setObjectName("secondary")
+        self.btn_copy_obs.clicked.connect(self.copy_obs_url_clicked.emit)
+        url_row.addWidget(self.obs_url_label, 1)
+        url_row.addWidget(self.btn_copy_obs)
+        url_wrap = QWidget()
+        url_wrap.setLayout(url_row)
+        self._add_form_label(form, "label.obs_url", url_wrap)
+
+        self.obs_status_label = QLabel()
+        self.obs_status_label.setObjectName("hint")
+        self.obs_status_label.setWordWrap(True)
+        form.addRow(self.obs_status_label)
+
+        self.obs_port_spin.valueChanged.connect(self._update_obs_url_label)
+        return self.obs_group
+
+    def _update_obs_url_label(self, *_args) -> None:
+        port = int(self.obs_port_spin.value())
+        self.obs_url_label.setText(f"http://127.0.0.1:{port}/")
 
     def _build_result_group(self) -> QGroupBox:
-        res = QGroupBox("最近結果")
-        res_l = QVBoxLayout(res)
+        self.result_group = QGroupBox()
+        res_l = QVBoxLayout(self.result_group)
         self.result_view = QTextEdit()
         self.result_view.setReadOnly(True)
         self.result_view.setMinimumHeight(72)
         self.result_view.setMaximumHeight(140)
         res_l.addWidget(self.result_view)
-        return res
+        return self.result_group
 
     def _build_footer(self) -> QWidget:
         row = QHBoxLayout()
         row.setContentsMargins(0, 4, 0, 0)
         row.addStretch(1)
-        self.btn_exit = QPushButton("結束程式")
+        self.btn_exit = QPushButton()
         self.btn_exit.setObjectName("danger")
-        self.btn_exit.setToolTip("結束 GalMaster（主視窗 + Overlay）")
         self.btn_exit.clicked.connect(self.exit_requested.emit)
         row.addWidget(self.btn_exit)
         wrap = QWidget()
@@ -458,6 +977,121 @@ class MainWindow(QMainWindow):
         self.setMinimumSize(360, 360)
         self.move(cfg.main_window_x, cfg.main_window_y)
 
+    # ------------------------------------------------------------------ i18n
+
+    def retranslate(self) -> None:
+        """Refresh all user-visible strings for the current UI language."""
+        dirty = self._dirty
+        self.setWindowTitle(tr("app.title_dirty") if dirty else tr("app.title"))
+        self.btn_start_monitor.setText(tr("btn.start_monitor"))
+        self.btn_start_monitor.setToolTip(tr("tip.start_monitor"))
+        self.btn_stop_monitor.setText(tr("btn.stop_monitor"))
+        self.btn_stop_monitor.setToolTip(tr("tip.stop_monitor"))
+        self.btn_apply.setText(tr("btn.apply"))
+        self.btn_apply.setToolTip(tr("tip.apply"))
+        self.btn_save.setText(tr("btn.save"))
+        self.btn_save.setToolTip(tr("tip.save"))
+        self.btn_cancel.setText(tr("btn.cancel"))
+        self.btn_cancel.setToolTip(tr("tip.cancel"))
+        self.settings_hint.setText(tr("hint.dirty") if dirty else tr("hint.apply_or_save"))
+
+        self.cap_group.setTitle(tr("group.capture"))
+        self.lang_group.setTitle(tr("group.lang"))
+        self.llm_group.setTitle(tr("group.llm"))
+        self.display_group.setTitle(tr("group.display"))
+        self.obs_group.setTitle(tr("group.obs"))
+        self.result_group.setTitle(tr("group.result"))
+        self.adv_group.setTitle(tr("group.llm_advanced"))
+
+        self.btn_refresh.setText(tr("btn.refresh"))
+        self.btn_region.setText(tr("btn.region"))
+        self.btn_translate.setText(tr("btn.translate"))
+        self.btn_exit.setText(tr("btn.exit"))
+        self.btn_exit.setToolTip(tr("tip.exit"))
+        self.btn_overlay.setToolTip(tr("tip.overlay"))
+        self.btn_cache.setText(tr("btn.clear_cache"))
+        self.btn_cache.setToolTip(tr("tip.clear_cache"))
+        self.btn_copy_obs.setText(tr("btn.copy_url"))
+        self.btn_refresh_models.setText(tr("btn.refresh_models"))
+        self.btn_refresh_models.setToolTip(tr("tip.refresh_models"))
+
+        self.lbl_pipeline_mode.setText(tr("label.pipeline_mode"))
+        self.pipeline_mode_combo.setItemText(0, tr("mode.ocr"))
+        self.pipeline_mode_combo.setItemText(1, tr("mode.vlm"))
+        self.pipeline_mode_combo.setToolTip(tr("tip.pipeline_mode"))
+        self.lbl_preview.setText(tr("label.preview"))
+        if not self.preview_label.pixmap() or self.preview_label.pixmap().isNull():
+            self.preview_label.setText(tr("hint.preview_empty"))
+
+        self.lbl_source.setText(tr("label.source"))
+        self.lbl_target.setText(tr("label.target"))
+        self.llm_optional_hint.setText(tr("hint.llm_optional"))
+        self.prompt_edit.setPlaceholderText(tr("hint.prompt"))
+        self.api_key_edit.setPlaceholderText(tr("hint.api_key"))
+        self.context_spin.setToolTip(tr("tip.context"))
+        self.sampling_hint.setText(tr("tip.sampling"))
+
+        self.ov_hint.setText(tr("hint.overlay"))
+        self.lbl_ocr_inline.setText(tr("label.ocr"))
+        self.lbl_opacity.setText(tr("label.opacity"))
+        self.ov_show_source_check.setText(tr("label.show_source"))
+        self.ov_show_translation_check.setText(tr("label.show_translation"))
+        self.lbl_ov_src_font.setText(tr("label.source_font"))
+        self.lbl_ov_tr_font.setText(tr("label.translation_font"))
+        self.lbl_ov_src_color.setText(tr("label.source_color"))
+        self.lbl_ov_tr_color.setText(tr("label.translation_color"))
+        self.ov_tr_bold_check.setText(tr("label.translation_bold"))
+        self.lbl_ov_bg.setText(tr("label.bg_color"))
+        self.lbl_ov_bg_alpha.setText(tr("label.bg_alpha"))
+        self.ov_align_combo.setItemText(0, tr("align.left"))
+        self.ov_align_combo.setItemText(1, tr("align.center"))
+        self.click_through_check.setText(tr("check.click_through"))
+        self.click_through_check.setToolTip(tr("tip.click_through"))
+        self.ocr_combo.setToolTip(tr("tip.ocr"))
+        for i, code in enumerate(("oneocr", "manga", "rapid", "paddle")):
+            self.ocr_combo.setItemText(i, tr(f"ocr.{code}"))
+
+        self.obs_hint.setText(tr("hint.obs"))
+        self.obs_enabled_check.setText(tr("label.obs_enabled"))
+        self.obs_show_source_check.setText(tr("label.show_source"))
+        self.obs_show_translation_check.setText(tr("label.show_translation"))
+        self.lbl_obs_src_font.setText(tr("label.source_font"))
+        self.lbl_obs_tr_font.setText(tr("label.translation_font"))
+        self.lbl_obs_src_color.setText(tr("label.source_color"))
+        self.lbl_obs_tr_color.setText(tr("label.translation_color"))
+        self.obs_tr_bold_check.setText(tr("label.translation_bold"))
+        self.lbl_obs_bg.setText(tr("label.bg_color"))
+        self.lbl_obs_bg_alpha.setText(tr("label.bg_alpha"))
+        self.obs_align_combo.setItemText(0, tr("align.left"))
+        self.obs_align_combo.setItemText(1, tr("align.center"))
+
+        self.stable_ms_spin.setToolTip(tr("tip.stable_ms"))
+        self.interval_spin.setToolTip(tr("tip.interval"))
+        self.cooldown_spin.setToolTip(tr("tip.cooldown"))
+        self.threshold_spin.setToolTip(tr("tip.threshold"))
+
+        for key, lab in self._form_labels.items():
+            lab.setText(tr(key))
+
+        # reasoning combo labels
+        mapping = {
+            "": "reasoning.unset",
+            "none": "reasoning.none",
+            "low": "reasoning.low",
+            "medium": "reasoning.medium",
+            "high": "reasoning.high",
+        }
+        for i in range(self.reasoning_combo.count()):
+            code = self.reasoning_combo.itemData(i)
+            self.reasoning_combo.setItemText(i, tr(mapping.get(code or "", "reasoning.unset")))
+
+        self.set_overlay_button_state(self._overlay_visible)
+        self._refresh_obs_status_label()
+        self._update_region_label()
+        # keep window none item if present
+        if self.window_combo.count() > 0 and self.window_combo.itemData(0) == 0:
+            self.window_combo.setItemText(0, tr("window.none"))
+
     # ------------------------------------------------------------------ config
 
     def force_close(self) -> None:
@@ -476,18 +1110,20 @@ class MainWindow(QMainWindow):
         c = self._cfg
         if c.has_region:
             bound = c.bound_title or (
-                f"hwnd={c.bound_hwnd}" if c.bound_hwnd else "螢幕座標"
+                f"hwnd={c.bound_hwnd}" if c.bound_hwnd else tr("hint.region_screen")
             )
             self.region_label.setText(
-                f"區域 ({c.region_x},{c.region_y}) {c.region_w}×{c.region_h} · {bound}"
+                f"({c.region_x},{c.region_y}) {c.region_w}×{c.region_h} · {bound}"
             )
         else:
-            self.region_label.setText("尚未框選區域")
+            self.region_label.setText(tr("hint.region_none"))
 
     def set_config(self, cfg: AppConfig) -> None:
         """Replace applied snapshot and reload UI (e.g. Cancel / external update)."""
         self._cfg = deepcopy(cfg)
+        set_language(getattr(cfg, "ui_language", "zh-Hant") or "zh-Hant")
         self.load_from_config(cfg)
+        self.retranslate()
         self._update_region_label()
 
     def load_from_config(self, cfg: AppConfig) -> None:
@@ -498,25 +1134,179 @@ class MainWindow(QMainWindow):
             self._sync_api_meta_from_provider(apply_defaults=False)
             self.api_key_edit.setText(cfg.api_key or "")
             self.base_url_edit.setText(cfg.base_url or "")
-            self.model_edit.setText(cfg.model or "")
+            self.set_model_text(cfg.model or "")
             self.prompt_edit.setText(cfg.custom_prompt or "")
             self.context_spin.setValue(int(getattr(cfg, "context_history_size", 3) or 0))
+            self.max_tokens_spin.setValue(int(getattr(cfg, "max_tokens", 2048) or 2048))
             self._set_combo(self.source_combo, cfg.source_lang)
             self._set_combo(self.target_combo, cfg.target_lang)
             self.hotkey_edit.setText(cfg.hotkey or "Ctrl+Shift+T")
             self.opacity_spin.setValue(cfg.overlay_opacity)
-            self.font_spin.setValue(cfg.overlay_font_size)
+            self.ov_show_source_check.setChecked(
+                bool(getattr(cfg, "overlay_show_source", True))
+            )
+            self.ov_show_translation_check.setChecked(
+                bool(getattr(cfg, "overlay_show_translation", True))
+            )
+            ofam = str(getattr(cfg, "overlay_font_family", "") or "")
+            if ofam:
+                self.ov_font_combo.setCurrentFont(QFont(ofam))
+            else:
+                self.ov_font_combo.setCurrentIndex(-1)
+                self.ov_font_combo.setEditText("")
+            self.ov_src_font_spin.setValue(
+                int(getattr(cfg, "overlay_source_font_size", 14) or 14)
+            )
+            self.ov_tr_font_spin.setValue(
+                int(
+                    getattr(
+                        cfg,
+                        "overlay_translation_font_size",
+                        getattr(cfg, "overlay_font_size", 16),
+                    )
+                    or 16
+                )
+            )
+            self.ov_src_color_btn.set_color(
+                getattr(cfg, "overlay_source_color", "#c8c8d8")
+            )
+            self.ov_tr_color_btn.set_color(
+                getattr(cfg, "overlay_translation_color", "#ffffff")
+            )
+            self.ov_tr_bold_check.setChecked(
+                bool(getattr(cfg, "overlay_translation_bold", True))
+            )
+            self._set_combo(
+                self.ov_align_combo,
+                getattr(cfg, "overlay_text_align", "left") or "left",
+            )
+            self.ov_bg_color_btn.set_color(getattr(cfg, "overlay_bg_color", "#14141c"))
+            self.ov_bg_alpha_spin.setValue(
+                int(getattr(cfg, "overlay_bg_alpha", 210) or 210)
+            )
             self.click_through_check.setChecked(cfg.overlay_click_through)
             self._set_combo(
                 self.ocr_combo,
                 normalize_ocr_engine(cfg.ocr_engine or DEFAULT_OCR_ENGINE),
+            )
+            self._set_combo(
+                self.pipeline_mode_combo,
+                (getattr(cfg, "pipeline_mode", "ocr") or "ocr"),
+            )
+            self._set_combo(
+                self.ui_lang_combo,
+                getattr(cfg, "ui_language", "zh-Hant") or "zh-Hant",
             )
             stable_ms = int(getattr(cfg, "monitor_stable_ms", 800) or 0)
             if not getattr(cfg, "monitor_wait_stable", True):
                 stable_ms = 0
             self.stable_ms_spin.setValue(max(0, stable_ms))
             self.interval_spin.setValue(int(cfg.monitor_interval_ms or 0))
+            self.cooldown_spin.setValue(int(getattr(cfg, "monitor_cooldown_ms", 1200) or 0))
             self.threshold_spin.setValue(float(cfg.monitor_diff_threshold))
+
+            # optional sampling
+            def _load_opt_float(chk, spin, val, default):
+                if val is None:
+                    chk.setChecked(False)
+                    spin.setEnabled(False)
+                    spin.setValue(default)
+                else:
+                    chk.setChecked(True)
+                    spin.setEnabled(True)
+                    spin.setValue(float(val))
+
+            def _load_opt_int(chk, spin, val, default):
+                if val is None or (isinstance(val, int) and val <= 0 and spin is self.topk_spin):
+                    # top_k: None or 0 = unset
+                    if val is None or (spin is self.topk_spin and (val is None or int(val) <= 0)):
+                        chk.setChecked(False)
+                        spin.setEnabled(False)
+                        spin.setValue(default)
+                        return
+                if val is None:
+                    chk.setChecked(False)
+                    spin.setEnabled(False)
+                    spin.setValue(default)
+                else:
+                    chk.setChecked(True)
+                    spin.setEnabled(True)
+                    spin.setValue(int(val))
+
+            _load_opt_float(self.temp_chk, self.temp_spin, getattr(cfg, "temperature", None), 0.2)
+            _load_opt_float(self.topp_chk, self.topp_spin, getattr(cfg, "top_p", None), 1.0)
+            topk = getattr(cfg, "top_k", None)
+            if topk is not None and int(topk) > 0:
+                self.topk_chk.setChecked(True)
+                self.topk_spin.setEnabled(True)
+                self.topk_spin.setValue(int(topk))
+            else:
+                self.topk_chk.setChecked(False)
+                self.topk_spin.setEnabled(False)
+                self.topk_spin.setValue(40)
+            _load_opt_float(
+                self.fp_chk, self.fp_spin, getattr(cfg, "frequency_penalty", None), 0.0
+            )
+            _load_opt_float(
+                self.pp_chk, self.pp_spin, getattr(cfg, "presence_penalty", None), 0.0
+            )
+            seed = getattr(cfg, "seed", None)
+            if seed is not None:
+                self.seed_chk.setChecked(True)
+                self.seed_spin.setEnabled(True)
+                self.seed_spin.setValue(int(seed))
+            else:
+                self.seed_chk.setChecked(False)
+                self.seed_spin.setEnabled(False)
+                self.seed_spin.setValue(0)
+            effort = (getattr(cfg, "reasoning_effort", "") or "").strip().lower()
+            self._set_combo(self.reasoning_combo, effort)
+
+            self.obs_enabled_check.setChecked(bool(getattr(cfg, "obs_enabled", False)))
+            self.obs_port_spin.setValue(int(getattr(cfg, "obs_port", 8765) or 8765))
+            self.obs_show_source_check.setChecked(
+                bool(getattr(cfg, "obs_show_source", False))
+            )
+            self.obs_show_translation_check.setChecked(
+                bool(getattr(cfg, "obs_show_translation", True))
+            )
+            obs_fam = str(getattr(cfg, "obs_font_family", "") or "")
+            if obs_fam:
+                self.obs_font_combo.setCurrentFont(QFont(obs_fam))
+            else:
+                self.obs_font_combo.setCurrentIndex(-1)
+                self.obs_font_combo.setEditText("")
+            self.obs_src_font_spin.setValue(
+                int(getattr(cfg, "obs_source_font_size", 20) or 20)
+            )
+            self.obs_tr_font_spin.setValue(
+                int(
+                    getattr(
+                        cfg,
+                        "obs_translation_font_size",
+                        getattr(cfg, "obs_font_size", 28),
+                    )
+                    or 28
+                )
+            )
+            self.obs_src_color_btn.set_color(
+                getattr(cfg, "obs_source_color", "#d8d8e0")
+            )
+            self.obs_tr_color_btn.set_color(
+                getattr(cfg, "obs_translation_color", "#ffffff")
+            )
+            self.obs_tr_bold_check.setChecked(
+                bool(getattr(cfg, "obs_translation_bold", True))
+            )
+            self._set_combo(
+                self.obs_align_combo, getattr(cfg, "obs_text_align", "left") or "left"
+            )
+            self.obs_bg_color_btn.set_color(getattr(cfg, "obs_bg_color", "#000000"))
+            self.obs_bg_alpha_spin.setValue(
+                int(getattr(cfg, "obs_bg_alpha", 140) or 140)
+            )
+            self._update_obs_url_label()
+            self._on_pipeline_mode_changed()
         finally:
             self._loading_ui = False
         self._set_dirty(False)
@@ -532,23 +1322,84 @@ class MainWindow(QMainWindow):
         c.base_url = self.base_url_edit.text().strip() or (
             preset.base_url if preset else "https://api.x.ai/v1"
         )
-        c.model = self.model_edit.text().strip() or c.model
+        c.model = self.model_text().strip() or c.model
         c.custom_prompt = self.prompt_edit.text().strip()
         c.context_history_size = int(self.context_spin.value())
+        c.max_tokens = int(self.max_tokens_spin.value())
         c.source_lang = self.source_combo.currentData() or "ja"
         c.target_lang = self.target_combo.currentData() or "zh-Hant"
         c.hotkey = self.hotkey_edit.text().strip() or "Ctrl+Shift+T"
         c.overlay_opacity = float(self.opacity_spin.value())
-        c.overlay_font_size = int(self.font_spin.value())
+        c.overlay_show_source = self.ov_show_source_check.isChecked()
+        c.overlay_show_translation = self.ov_show_translation_check.isChecked()
+        if not c.overlay_show_source and not c.overlay_show_translation:
+            c.overlay_show_translation = True
+        c.overlay_font_family = self.ov_font_combo.currentText().strip()
+        c.overlay_source_font_size = int(self.ov_src_font_spin.value())
+        c.overlay_translation_font_size = int(self.ov_tr_font_spin.value())
+        c.overlay_font_size = c.overlay_translation_font_size
+        c.overlay_source_color = normalize_hex_color(
+            self.ov_src_color_btn.color(), "#c8c8d8"
+        )
+        c.overlay_translation_color = normalize_hex_color(
+            self.ov_tr_color_btn.color(), "#ffffff"
+        )
+        c.overlay_translation_bold = self.ov_tr_bold_check.isChecked()
+        c.overlay_text_align = self.ov_align_combo.currentData() or "left"
+        c.overlay_bg_color = normalize_hex_color(
+            self.ov_bg_color_btn.color(), "#14141c"
+        )
+        c.overlay_bg_alpha = int(self.ov_bg_alpha_spin.value())
         c.overlay_click_through = self.click_through_check.isChecked()
         c.ocr_engine = normalize_ocr_engine(
             self.ocr_combo.currentData() or DEFAULT_OCR_ENGINE
         )
+        c.pipeline_mode = self.pipeline_mode_combo.currentData() or "ocr"
+        c.ui_language = self.ui_lang_combo.currentData() or "zh-Hant"
         c.auto_monitor = bool(self._monitor_running)
         c.monitor_stable_ms = int(self.stable_ms_spin.value())
         c.monitor_wait_stable = c.monitor_stable_ms > 0
         c.monitor_interval_ms = int(self.interval_spin.value())
+        c.monitor_cooldown_ms = int(self.cooldown_spin.value())
         c.monitor_diff_threshold = float(self.threshold_spin.value())
+
+        c.temperature = _optional_float_row(enabled=self.temp_chk.isChecked(), spin=self.temp_spin)
+        c.top_p = _optional_float_row(enabled=self.topp_chk.isChecked(), spin=self.topp_spin)
+        c.top_k = (
+            int(self.topk_spin.value())
+            if self.topk_chk.isChecked() and int(self.topk_spin.value()) > 0
+            else None
+        )
+        c.frequency_penalty = _optional_float_row(
+            enabled=self.fp_chk.isChecked(), spin=self.fp_spin
+        )
+        c.presence_penalty = _optional_float_row(
+            enabled=self.pp_chk.isChecked(), spin=self.pp_spin
+        )
+        c.seed = _optional_int_row(enabled=self.seed_chk.isChecked(), spin=self.seed_spin)
+        c.reasoning_effort = (self.reasoning_combo.currentData() or "") or ""
+
+        c.obs_enabled = self.obs_enabled_check.isChecked()
+        c.obs_port = int(self.obs_port_spin.value())
+        c.obs_show_source = self.obs_show_source_check.isChecked()
+        c.obs_show_translation = self.obs_show_translation_check.isChecked()
+        if not c.obs_show_source and not c.obs_show_translation:
+            c.obs_show_translation = True
+        c.obs_font_family = self.obs_font_combo.currentText().strip()
+        c.obs_source_font_size = int(self.obs_src_font_spin.value())
+        c.obs_translation_font_size = int(self.obs_tr_font_spin.value())
+        c.obs_font_size = c.obs_translation_font_size
+        c.obs_source_color = normalize_hex_color(
+            self.obs_src_color_btn.color(), "#d8d8e0"
+        )
+        c.obs_translation_color = normalize_hex_color(
+            self.obs_tr_color_btn.color(), "#ffffff"
+        )
+        c.obs_translation_bold = self.obs_tr_bold_check.isChecked()
+        c.obs_text_align = self.obs_align_combo.currentData() or "left"
+        c.obs_bg_color = normalize_hex_color(self.obs_bg_color_btn.color(), "#000000")
+        c.obs_bg_alpha = int(self.obs_bg_alpha_spin.value())
+
         geo = self.geometry()
         c.main_window_x, c.main_window_y = geo.x(), geo.y()
         c.main_window_w, c.main_window_h = geo.width(), geo.height()
@@ -557,22 +1408,29 @@ class MainWindow(QMainWindow):
     def mark_applied(self, cfg: AppConfig) -> None:
         """Called after successful Apply/Save."""
         self._cfg = deepcopy(cfg)
+        lang = getattr(cfg, "ui_language", "zh-Hant") or "zh-Hant"
+        set_language(lang)
+        self.retranslate()
         self._set_dirty(False)
         self._update_region_label()
 
     def _set_dirty(self, dirty: bool) -> None:
         self._dirty = dirty
         if dirty:
-            self.settings_hint.setText("有未套用的變更")
-            self.setWindowTitle("GalMaster *")
+            self.settings_hint.setText(tr("hint.dirty"))
+            self.setWindowTitle(tr("app.title_dirty"))
         else:
-            self.settings_hint.setText("修改後請套用或儲存")
-            self.setWindowTitle("GalMaster")
+            self.settings_hint.setText(tr("hint.apply_or_save"))
+            self.setWindowTitle(tr("app.title"))
 
     def _mark_dirty(self, *_args) -> None:
         if self._loading_ui or self._applying_preset:
             return
         self._set_dirty(True)
+
+    def _on_pipeline_mode_changed(self, *_args) -> None:
+        mode = self.pipeline_mode_combo.currentData() or "ocr"
+        self.ocr_combo.setEnabled(mode != "vlm")
 
     def _on_provider_changed(self, _idx: int = 0) -> None:
         if self._loading_ui or self._applying_preset:
@@ -597,7 +1455,7 @@ class MainWindow(QMainWindow):
             bits.append(preset.hint)
         self.api_meta_label.setText(" · ".join(bits))
 
-        if preset.env_keys:
+        if preset.env_keys and not self.api_key_edit.placeholderText():
             self.api_key_edit.setPlaceholderText(" / ".join(preset.env_keys))
 
         if apply_defaults:
@@ -605,16 +1463,73 @@ class MainWindow(QMainWindow):
             try:
                 self.base_url_edit.setText(preset.base_url)
                 if preset.model:
-                    self.model_edit.setText(preset.model)
+                    self.set_model_text(preset.model)
             finally:
                 self._applying_preset = False
+
+    def model_text(self) -> str:
+        if self.model_combo.lineEdit() is not None:
+            return self.model_combo.lineEdit().text()
+        return self.model_combo.currentText()
+
+    def set_model_text(self, model: str) -> None:
+        model = model or ""
+        self.model_combo.blockSignals(True)
+        try:
+            idx = self.model_combo.findText(model, Qt.MatchFlag.MatchExactly)
+            if idx >= 0:
+                self.model_combo.setCurrentIndex(idx)
+            elif self.model_combo.lineEdit() is not None:
+                self.model_combo.lineEdit().setText(model)
+            else:
+                self.model_combo.setCurrentText(model)
+        finally:
+            self.model_combo.blockSignals(False)
+
+    def _on_model_combo_changed(self, _idx: int = 0) -> None:
+        if self._loading_ui or self._applying_preset:
+            return
+        # Selecting from list writes into editable line
+        if self.model_combo.lineEdit() is not None and self.model_combo.currentData():
+            self.model_combo.lineEdit().setText(str(self.model_combo.currentData()))
+        self._mark_dirty()
+
+    def set_models_list(self, models: list[str], *, keep_current: bool = True) -> None:
+        """Populate model dropdown; keep current typed model if present."""
+        current = self.model_text().strip() if keep_current else ""
+        self._model_ids = list(models or [])
+        self.model_combo.blockSignals(True)
+        try:
+            self.model_combo.clear()
+            for mid in self._model_ids:
+                self.model_combo.addItem(mid, mid)
+            if current:
+                idx = self.model_combo.findText(current, Qt.MatchFlag.MatchExactly)
+                if idx >= 0:
+                    self.model_combo.setCurrentIndex(idx)
+                elif self.model_combo.lineEdit() is not None:
+                    self.model_combo.lineEdit().setText(current)
+                else:
+                    self.model_combo.setEditText(current)
+            elif self._model_ids:
+                self.model_combo.setCurrentIndex(0)
+        finally:
+            self.model_combo.blockSignals(False)
+
+    def set_models_status(self, msg: str) -> None:
+        self.models_status_label.setText(msg or "")
+
+    def set_models_refreshing(self, busy: bool) -> None:
+        self.btn_refresh_models.setEnabled(not busy)
+        if busy:
+            self.models_status_label.setText(tr("models.loading"))
 
     def set_windows(self, windows: list[WindowInfo]) -> None:
         self._windows = windows
         current_hwnd = self._cfg.bound_hwnd
         self.window_combo.blockSignals(True)
         self.window_combo.clear()
-        self.window_combo.addItem("（不綁定 — 螢幕座標）", 0)
+        self.window_combo.addItem(tr("window.none"), 0)
         select = 0
         for i, w in enumerate(windows, start=1):
             self.window_combo.addItem(w.title[:80], w.hwnd)
@@ -644,11 +1559,41 @@ class MainWindow(QMainWindow):
     def set_result_text(self, text: str) -> None:
         self.result_view.setPlainText(text)
 
+    def set_preview_image(self, img: Image.Image | None) -> None:
+        """Show capture preview on the main thread."""
+        if img is None:
+            self.preview_label.setPixmap(QPixmap())
+            self.preview_label.setText(tr("hint.preview_empty"))
+            return
+        rgb = img.convert("RGB")
+        data = rgb.tobytes("raw", "RGB")
+        qimg = QImage(
+            data,
+            rgb.width,
+            rgb.height,
+            rgb.width * 3,
+            QImage.Format.Format_RGB888,
+        )
+        # Keep a copy so buffer lifetime is safe
+        qimg = qimg.copy()
+        pix = QPixmap.fromImage(qimg)
+        target = self.preview_label.size()
+        if target.width() < 10 or target.height() < 10:
+            target = self.preview_label.minimumSize()
+        scaled = pix.scaled(
+            max(target.width(), 200),
+            max(target.height(), 120),
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation,
+        )
+        self.preview_label.setText("")
+        self.preview_label.setPixmap(scaled)
+
     def set_status(self, msg: str, *, busy: bool | None = None) -> None:
         text = msg or ""
         self.statusBar().showMessage(text)
         if hasattr(self, "work_status") and self.work_status is not None:
-            self.work_status.setText(text if text else "就緒")
+            self.work_status.setText(text if text else tr("status.ready_short"))
             if busy is not None:
                 self.work_status.setProperty("busy", "true" if busy else "false")
                 self.work_status.style().unpolish(self.work_status)
@@ -658,7 +1603,7 @@ class MainWindow(QMainWindow):
         self.btn_translate.setEnabled(not busy)
         self.btn_region.setEnabled(not busy)
         if busy and hasattr(self, "work_status"):
-            cur = self.work_status.text() or "處理中…"
+            cur = self.work_status.text() or tr("status.processing")
             self.set_status(cur, busy=True)
         elif not busy and hasattr(self, "work_status"):
             self.work_status.setProperty("busy", "false")
@@ -666,10 +1611,37 @@ class MainWindow(QMainWindow):
             self.work_status.style().polish(self.work_status)
 
     def set_overlay_button_state(self, visible: bool) -> None:
+        self._overlay_visible = bool(visible)
         if visible:
-            self.btn_overlay.setText("隱藏 Overlay")
+            self.btn_overlay.setText(tr("btn.overlay_hide"))
         else:
-            self.btn_overlay.setText("顯示 Overlay")
+            self.btn_overlay.setText(tr("btn.overlay_show"))
+
+    def set_obs_status(self, *, running: bool, url: str = "", error: str = "") -> None:
+        if error:
+            self._obs_status_key = "err"
+            self._obs_status_err = error
+            self._obs_status_url = ""
+        elif running:
+            self._obs_status_key = "on"
+            self._obs_status_url = url
+            self._obs_status_err = ""
+        else:
+            self._obs_status_key = "off"
+            self._obs_status_url = ""
+            self._obs_status_err = ""
+        self._refresh_obs_status_label()
+
+    def _refresh_obs_status_label(self) -> None:
+        if self._obs_status_key == "on":
+            self.obs_status_label.setText(tr("obs.status_on", url=self._obs_status_url))
+        elif self._obs_status_key == "err":
+            self.obs_status_label.setText(tr("obs.status_err", err=self._obs_status_err))
+        else:
+            self.obs_status_label.setText(tr("obs.status_off"))
+
+    def obs_url(self) -> str:
+        return f"http://127.0.0.1:{int(self.obs_port_spin.value())}/"
 
     def _on_refresh(self) -> None:
         self.refresh_windows_clicked.emit()
