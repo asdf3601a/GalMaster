@@ -6,7 +6,7 @@ from copy import deepcopy
 
 from PIL import Image
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QFont, QGuiApplication, QImage, QPixmap
+from PySide6.QtGui import QFont, QGuiApplication, QImage, QPixmap, QTextCursor
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -84,7 +84,10 @@ class MainWindow(QMainWindow):
         super().__init__()
         set_language(getattr(cfg, "ui_language", "zh-Hant") or "zh-Hant")
         self.setWindowTitle(tr("app.title"))
-        self.setStyleSheet(MAIN_STYLE)
+        # App-level stylesheet is set in main.py; keep a window copy for isolation
+        # when MainWindow is constructed in tests without going through main().
+        if not self.styleSheet():
+            self.setStyleSheet(MAIN_STYLE)
         self._cfg = deepcopy(cfg)  # last applied snapshot
         self._windows: list[WindowInfo] = []
         self._force_close = False
@@ -92,10 +95,13 @@ class MainWindow(QMainWindow):
         self._loading_ui = False
         self._dirty = False
         self._monitor_running = bool(cfg.auto_monitor)
+        self._pipeline_busy = False
         self._overlay_visible = True
         self._obs_status_key = "off"  # off | on | err
         self._obs_status_url = ""
         self._obs_status_err = ""
+        # Recent result log (one concise line per turn); newest last
+        self._result_lines: list[str] = []
 
         # form-row labels for retranslate: i18n_key -> one or more QLabel (no key collisions)
         self._form_labels: dict[str, list[QLabel]] = {}
@@ -189,7 +195,14 @@ class MainWindow(QMainWindow):
 
     def _set_monitor_buttons(self, running: bool) -> None:
         self._monitor_running = running
-        self.btn_start_monitor.setEnabled(not running)
+        # Start: only when not monitoring (busy state may still disable it).
+        if not running:
+            # Leave enable decision to set_busy if pipeline is mid-job.
+            if not getattr(self, "_pipeline_busy", False):
+                self.btn_start_monitor.setEnabled(True)
+        else:
+            self.btn_start_monitor.setEnabled(False)
+        # Stop must never wait on OCR/LLM — always clickable while monitoring.
         self.btn_stop_monitor.setEnabled(running)
 
     def set_monitor_running(self, running: bool) -> None:
@@ -367,12 +380,10 @@ class MainWindow(QMainWindow):
         cap_l.addWidget(self.lbl_preview)
 
         self.preview_label = QLabel()
+        self.preview_label.setObjectName("previewBox")
         self.preview_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.preview_label.setMinimumHeight(120)
         self.preview_label.setMaximumHeight(160)
-        self.preview_label.setStyleSheet(
-            "QLabel { background: #1a1a22; border: 1px solid #333; border-radius: 6px; color: #888; }"
-        )
         self.preview_label.setText(tr("hint.preview_empty"))
         self.preview_label.setScaledContents(False)
         cap_l.addWidget(self.preview_label)
@@ -741,6 +752,7 @@ class MainWindow(QMainWindow):
         self.ov_src_font_spin = NoWheelSpinBox()
         self.ov_src_font_spin.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.ov_src_font_spin.setRange(10, 48)
+        self.ov_src_font_spin.setMinimumWidth(88)
         self.ov_src_font_spin.setValue(
             int(getattr(cfg, "overlay_source_font_size", 14) or 14)
         )
@@ -748,6 +760,7 @@ class MainWindow(QMainWindow):
         self.ov_tr_font_spin = NoWheelSpinBox()
         self.ov_tr_font_spin.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.ov_tr_font_spin.setRange(10, 48)
+        self.ov_tr_font_spin.setMinimumWidth(88)
         self.ov_tr_font_spin.setValue(
             int(
                 getattr(
@@ -912,6 +925,7 @@ class MainWindow(QMainWindow):
         self.obs_src_font_spin = NoWheelSpinBox()
         self.obs_src_font_spin.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.obs_src_font_spin.setRange(10, 96)
+        self.obs_src_font_spin.setMinimumWidth(88)
         self.obs_src_font_spin.setValue(
             int(getattr(cfg, "obs_source_font_size", 20) or 20)
         )
@@ -919,6 +933,7 @@ class MainWindow(QMainWindow):
         self.obs_tr_font_spin = NoWheelSpinBox()
         self.obs_tr_font_spin.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.obs_tr_font_spin.setRange(10, 96)
+        self.obs_tr_font_spin.setMinimumWidth(88)
         self.obs_tr_font_spin.setValue(
             int(
                 getattr(
@@ -1034,12 +1049,38 @@ class MainWindow(QMainWindow):
             self.obs_url_label.setText(url)
 
     def _build_result_group(self) -> QGroupBox:
+        from app.config import clamp_result_history_lines
+
         self.result_group = QGroupBox()
         res_l = QVBoxLayout(self.result_group)
+        res_l.setSpacing(4)
+
+        head = QHBoxLayout()
+        head.setSpacing(6)
+        self.lbl_result_history = QLabel()
+        self.result_history_spin = NoWheelSpinBox()
+        self.result_history_spin.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.result_history_spin.setRange(1, 100)
+        self.result_history_spin.setSingleStep(1)
+        self.result_history_spin.setAlignment(Qt.AlignmentFlag.AlignLeft)
+        self.result_history_spin.setFixedWidth(72)
+        self.result_history_spin.setValue(
+            clamp_result_history_lines(
+                getattr(self._cfg, "result_history_lines", 12)
+            )
+        )
+        self.result_history_spin.valueChanged.connect(self._on_result_history_changed)
+        head.addWidget(self.lbl_result_history)
+        head.addWidget(self.result_history_spin)
+        head.addStretch(1)
+        res_l.addLayout(head)
+
         self.result_view = QTextEdit()
         self.result_view.setReadOnly(True)
-        self.result_view.setMinimumHeight(72)
-        self.result_view.setMaximumHeight(140)
+        self.result_view.setObjectName("resultLog")
+        self.result_view.setMinimumHeight(88)
+        self.result_view.setMaximumHeight(180)
+        self.result_view.setLineWrapMode(QTextEdit.LineWrapMode.WidgetWidth)
         res_l.addWidget(self.result_view)
         return self.result_group
 
@@ -1100,6 +1141,10 @@ class MainWindow(QMainWindow):
         self.display_group.setTitle(tr("group.display"))
         self.obs_group.setTitle(tr("group.obs"))
         self.result_group.setTitle(tr("group.result"))
+        if hasattr(self, "lbl_result_history"):
+            self.lbl_result_history.setText(tr("label.result_history"))
+        if hasattr(self, "result_history_spin"):
+            self.result_history_spin.setToolTip(tr("tip.result_history"))
         self.adv_group.setTitle(tr("group.llm_advanced"))
 
         self.btn_refresh.setText(tr("btn.refresh"))
@@ -1318,6 +1363,14 @@ class MainWindow(QMainWindow):
                     getattr(cfg, "pipeline_buffer_size", 3)
                 )
             )
+            from app.config import clamp_result_history_lines
+
+            if hasattr(self, "result_history_spin"):
+                self.result_history_spin.setValue(
+                    clamp_result_history_lines(
+                        getattr(cfg, "result_history_lines", 12)
+                    )
+                )
 
             # optional sampling
             def _load_opt_float(chk, spin, val, default):
@@ -1485,6 +1538,13 @@ class MainWindow(QMainWindow):
         from app.config import clamp_pipeline_buffer_size
 
         c.pipeline_buffer_size = clamp_pipeline_buffer_size(self.buffer_spin.value())
+        from app.config import clamp_result_history_lines
+
+        c.result_history_lines = clamp_result_history_lines(
+            self.result_history_spin.value()
+            if hasattr(self, "result_history_spin")
+            else getattr(c, "result_history_lines", 12)
+        )
 
         c.temperature = _optional_float_row(enabled=self.temp_chk.isChecked(), spin=self.temp_spin)
         c.top_p = _optional_float_row(enabled=self.topp_chk.isChecked(), spin=self.topp_spin)
@@ -1738,7 +1798,55 @@ class MainWindow(QMainWindow):
         self._mark_dirty()
 
     def set_result_text(self, text: str) -> None:
-        self.result_view.setPlainText(text)
+        """Replace the entire result log (legacy / rare full overwrite)."""
+        text = (text or "").strip()
+        if not text:
+            self._result_lines = []
+            self.result_view.clear()
+            return
+        lines = [ln for ln in text.splitlines() if ln.strip()]
+        max_n = self._result_history_cap()
+        self._result_lines = lines[-max_n:]
+        self._refresh_result_view()
+
+    def append_result_line(self, line: str) -> None:
+        """Append one concise result line and trim to configured history length."""
+        line = (line or "").strip()
+        if not line:
+            return
+        # Collapse internal newlines so each turn stays one log line
+        line = " ".join(line.split())
+        self._result_lines.append(line)
+        max_n = self._result_history_cap()
+        if len(self._result_lines) > max_n:
+            self._result_lines = self._result_lines[-max_n:]
+        self._refresh_result_view()
+
+    def _result_history_cap(self) -> int:
+        from app.config import clamp_result_history_lines
+
+        try:
+            return clamp_result_history_lines(self.result_history_spin.value())
+        except Exception:
+            return clamp_result_history_lines(
+                getattr(self._cfg, "result_history_lines", 12)
+            )
+
+    def _on_result_history_changed(self, *_args) -> None:
+        if self._loading_ui:
+            return
+        max_n = self._result_history_cap()
+        if len(self._result_lines) > max_n:
+            self._result_lines = self._result_lines[-max_n:]
+            self._refresh_result_view()
+        self._mark_dirty()
+
+    def _refresh_result_view(self) -> None:
+        self.result_view.setPlainText("\n".join(self._result_lines))
+        # Keep newest visible
+        cursor = self.result_view.textCursor()
+        cursor.movePosition(QTextCursor.MoveOperation.End)
+        self.result_view.setTextCursor(cursor)
 
     def set_preview_image(self, img: Image.Image | None) -> None:
         """Show capture preview on the main thread."""
@@ -1782,11 +1890,14 @@ class MainWindow(QMainWindow):
 
     def set_busy(self, busy: bool) -> None:
         # Always re-enable when idle so a failed pipeline cannot leave UI stuck.
+        self._pipeline_busy = bool(busy)
         idle = not busy
         self.btn_translate.setEnabled(idle)
         self.btn_region.setEnabled(idle)
+        # Start monitor only when idle and not already running.
         self.btn_start_monitor.setEnabled(idle and not self._monitor_running)
-        self.btn_stop_monitor.setEnabled(idle and self._monitor_running)
+        # Stop monitor must work during OCR/translate — never gated by busy.
+        self.btn_stop_monitor.setEnabled(self._monitor_running)
         self.btn_apply.setEnabled(idle)
         self.btn_save.setEnabled(idle)
         self.btn_cancel.setEnabled(idle)

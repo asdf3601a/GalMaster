@@ -31,7 +31,9 @@
   "group.lang": "Translation languages",
   "group.llm": "LLM API (optional)",
   "group.display": "Overlay style / Hotkey / UI",
-  "group.result": "Latest result",
+  "group.result": "Recent results",
+  "label.result_history": "Keep lines",
+  "tip.result_history": "How many lines to keep in the result log (one line per dialogue turn).\nOldest lines drop when full. Default 12.",
   "group.obs": "OBS subtitles",
   "group.llm_advanced": "Advanced parameters (unchecked = omit from request)",
   "label.stable_ms": "Stable time",
@@ -204,5 +206,8 @@
   "pipe.ocr_ready": "OCR ready: {label}",
   "result.source_error": "[Source]\n{source}\n\n({err})",
   "result.ocr_only": "[Source / OCR]\n{source}\n\n(No API Key — OCR only)",
-  "result.full": "[Source]\n{source}\n\n[Translation]{cache}\n{translation}"
+  "result.full": "[Source]\n{source}\n\n[Translation]{cache}\n{translation}",
+  "result.line_full": "{source}  →  {translation}",
+  "result.line_ocr": "{source}",
+  "result.line_error": "{source}  →  ! {err}"
 }

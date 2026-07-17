@@ -5,13 +5,25 @@ from __future__ import annotations
 from PySide6.QtCore import Signal
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
+    QAbstractSpinBox,
     QColorDialog,
     QComboBox,
     QDoubleSpinBox,
     QFontComboBox,
     QPushButton,
+    QSizePolicy,
     QSpinBox,
 )
+
+# Match combo visual height under MAIN_STYLE; QSS splits into two flush +/- buttons.
+_SPIN_FIXED_H = 36
+
+
+def _compact_spin(widget: QAbstractSpinBox) -> None:
+    """Keep +/- stacked flush; prevent layout from stretching the control taller."""
+    widget.setFixedHeight(_SPIN_FIXED_H)
+    widget.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+    widget.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.UpDownArrows)
 
 
 class NoWheelComboBox(QComboBox):
@@ -22,6 +34,10 @@ class NoWheelComboBox(QComboBox):
 
 
 class NoWheelSpinBox(QSpinBox):
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        _compact_spin(self)
+
     def wheelEvent(self, event) -> None:  # noqa: N802
         if self.hasFocus():
             super().wheelEvent(event)
@@ -30,6 +46,10 @@ class NoWheelSpinBox(QSpinBox):
 
 
 class NoWheelDoubleSpinBox(QDoubleSpinBox):
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        _compact_spin(self)
+
     def wheelEvent(self, event) -> None:  # noqa: N802
         if self.hasFocus():
             super().wheelEvent(event)

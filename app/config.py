@@ -45,6 +45,10 @@ PIPELINE_BUFFER_MIN = 1
 PIPELINE_BUFFER_MAX = 16
 PIPELINE_BUFFER_DEFAULT = 3
 
+RESULT_HISTORY_MIN = 1
+RESULT_HISTORY_MAX = 100
+RESULT_HISTORY_DEFAULT = 12
+
 # OCR engine ids (pure string map — no OCR package import)
 OCR_ENGINE_IDS: tuple[str, ...] = ("oneocr", "manga", "rapid", "paddle")
 DEFAULT_OCR_ENGINE = "oneocr"
@@ -87,6 +91,15 @@ def clamp_pipeline_buffer_size(value: Any) -> int:
     except (TypeError, ValueError):
         return PIPELINE_BUFFER_DEFAULT
     return max(PIPELINE_BUFFER_MIN, min(PIPELINE_BUFFER_MAX, n))
+
+
+def clamp_result_history_lines(value: Any) -> int:
+    """Clamp result log line count to 1..100 (default 12)."""
+    try:
+        n = int(value)
+    except (TypeError, ValueError):
+        return RESULT_HISTORY_DEFAULT
+    return max(RESULT_HISTORY_MIN, min(RESULT_HISTORY_MAX, n))
 
 
 def normalize_hex_color(value: Any, default: str) -> str:
@@ -210,6 +223,8 @@ class AppConfig:
     # Max queued Process jobs while one is running (1 = keep latest only).
     # Running job is not counted; in-flight ≈ 1 + pipeline_buffer_size.
     pipeline_buffer_size: int = 3
+    # Main-window "最近結果" log: keep last N concise lines (one line per turn).
+    result_history_lines: int = 12
 
     # OCR engine: "oneocr" | "manga" | "rapid" | "paddle"
     ocr_engine: str = "oneocr"
@@ -299,6 +314,9 @@ class AppConfig:
         )
         cfg.pipeline_buffer_size = clamp_pipeline_buffer_size(
             getattr(cfg, "pipeline_buffer_size", 3)
+        )
+        cfg.result_history_lines = clamp_result_history_lines(
+            getattr(cfg, "result_history_lines", RESULT_HISTORY_DEFAULT)
         )
         # Coerce optional sampling fields: empty string / bad values → None
         for opt in (

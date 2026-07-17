@@ -47,11 +47,9 @@ class RegionMonitor(QObject):
 
     @property
     def is_running(self) -> bool:
+        """True only for the active monitor generation (not a dying zombie)."""
         t = self._thread
-        if t is not None and t.is_alive():
-            return True
-        z = self._zombie
-        return z is not None and z.is_alive()
+        return t is not None and t.is_alive()
 
     def configure(self, cfg: AppConfig) -> None:
         """Replace monitor config snapshot (thread-safe)."""
@@ -113,13 +111,19 @@ class RegionMonitor(QObject):
         self._thread = t
         t.start()
 
-    def stop(self) -> None:
+    def stop(self, *, wait: float = 0.2) -> None:
+        """
+        Signal the loop to exit.
+
+        *wait* is a short join only so the UI/main thread is never blocked by
+        an in-flight capture/OCR. If the worker is still busy, it becomes a
+        zombie until it exits; start() reclaims zombies first.
+        """
         self._stop.set()
         t = self._thread
         self._thread = None
         if t is not None and t.is_alive():
-            # Capture can block briefly; join with a cap so UI never freezes long.
-            t.join(timeout=4.0)
+            t.join(timeout=max(0.0, float(wait)))
             if t.is_alive():
                 # Do not clear the generation stop event; keep as zombie so
                 # start() refuses until it dies (never share a cleared Event).

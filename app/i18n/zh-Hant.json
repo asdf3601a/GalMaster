@@ -32,6 +32,8 @@
   "group.llm": "LLM API（可選）",
   "group.display": "Overlay 樣式 / 熱鍵 / 介面",
   "group.result": "最近結果",
+  "label.result_history": "保留行數",
+  "tip.result_history": "最近結果日誌最多保留幾行（每則對白一行）。\n超過時從最舊的開始丟棄。預設 12。",
   "group.obs": "OBS 字幕",
   "group.llm_advanced": "進階參數（未勾選 = 不送出該欄位）",
   "label.stable_ms": "穩定時間",
@@ -204,5 +206,8 @@
   "pipe.ocr_ready": "OCR 引擎就緒：{label}",
   "result.source_error": "【原文】\n{source}\n\n（{err}）",
   "result.ocr_only": "【原文 / OCR】\n{source}\n\n（未設定 API Key，僅 OCR）",
-  "result.full": "【原文】\n{source}\n\n【譯文】{cache}\n{translation}"
+  "result.full": "【原文】\n{source}\n\n【譯文】{cache}\n{translation}",
+  "result.line_full": "{source}  →  {translation}",
+  "result.line_ocr": "{source}",
+  "result.line_error": "{source}  →  ! {err}"
 }

@@ -372,9 +372,14 @@ class AppController(QObject):
                 mode = tr("monitor.mode_immediate")
             self.main.set_status(tr("status.monitor_on", mode=mode), busy=False)
         else:
+            # Stop must not wait on OCR/LLM: signal monitor off, drop auto backlog.
             self.cfg.auto_monitor = False
-            self.monitor.stop()
+            self.monitor.stop(wait=0.15)
             self.capture_stage.reset_deferred()
+            try:
+                self.pipeline.clear_auto_queue()
+            except Exception:
+                pass
             self.main.set_monitor_running(False)
             self.main.sync_operational_monitor(self.cfg)
             try:
@@ -440,6 +445,10 @@ class AppController(QObject):
         clears waiting auto jobs when enqueued.
         force=False (auto-monitor): may queue while Process is busy (bounded buffer).
         """
+        # Drop late auto fires after the user stopped monitoring (stop is non-blocking).
+        if not force and not self.cfg.auto_monitor:
+            return
+
         if not self._ensure_capture_target():
             return
 
@@ -753,10 +762,10 @@ class AppController(QObject):
             return
         if result.error and result.source_text and not result.translated_text:
             self.main.set_status(result.error, busy=False)
-            self.main.set_result_text(
-                tr(
-                    "result.source_error",
+            self.main.append_result_line(
+                self._format_result_line(
                     source=result.source_text,
+                    translation="",
                     err=result.error,
                 )
             )
@@ -778,8 +787,13 @@ class AppController(QObject):
             return
 
         if result.ocr_only:
-            text = tr("result.ocr_only", source=result.source_text)
-            self.main.set_result_text(text)
+            self.main.append_result_line(
+                self._format_result_line(
+                    source=result.source_text,
+                    translation="",
+                    ocr_only=True,
+                )
+            )
             self.main.set_status(tr("pipe.ocr_done"), busy=False)
             self.overlay.set_content(
                 source=result.source_text,
@@ -798,13 +812,13 @@ class AppController(QObject):
             return
 
         cache_tag = tr("pipe.cache_tag") if result.from_cache else ""
-        text = tr(
-            "result.full",
-            source=result.source_text,
-            cache=cache_tag,
-            translation=result.translated_text,
+        self.main.append_result_line(
+            self._format_result_line(
+                source=result.source_text,
+                translation=result.translated_text,
+                from_cache=result.from_cache,
+            )
         )
-        self.main.set_result_text(text)
         self.main.set_status(tr("pipe.done") + cache_tag, busy=False)
         self.overlay.set_content(
             source=result.source_text,
@@ -820,6 +834,34 @@ class AppController(QObject):
             )
         except Exception:
             pass
+
+    @staticmethod
+    def _format_result_line(
+        *,
+        source: str,
+        translation: str = "",
+        err: str = "",
+        ocr_only: bool = False,
+        from_cache: bool = False,
+    ) -> str:
+        """One-line concise log entry for the main-window result history."""
+
+        def _flat(s: str) -> str:
+            return " ".join((s or "").split())
+
+        src = _flat(source)
+        if err:
+            return tr("result.line_error", source=src, err=_flat(err))
+        if ocr_only or not _flat(translation):
+            return tr("result.line_ocr", source=src)
+        line = tr(
+            "result.line_full",
+            source=src,
+            translation=_flat(translation),
+        )
+        if from_cache:
+            line = f"{line} {tr('pipe.cache_tag')}".rstrip()
+        return line
 
     def persist(self) -> None:
         g = self.overlay.geometry()

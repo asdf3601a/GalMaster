@@ -10,7 +10,7 @@ import ctypes
 from typing import Any
 
 from PySide6.QtCore import QEvent, QObject, QPoint, QRect, Qt, Signal
-from PySide6.QtGui import QCursor, QFont, QMouseEvent
+from PySide6.QtGui import QCursor, QMouseEvent
 from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
@@ -20,7 +20,11 @@ from PySide6.QtWidgets import (
 )
 
 from app.i18n import tr
-from app.ui.styles import OVERLAY_PANEL_STYLE, overlay_panel_style
+from app.ui.styles import (
+    OVERLAY_PANEL_STYLE,
+    _css_font_family,
+    overlay_panel_style,
+)
 
 GWL_EXSTYLE = -20
 WS_EX_LAYERED = 0x00080000
@@ -198,15 +202,7 @@ class OverlayWindow(QWidget):
         except (TypeError, ValueError):
             self._bg_alpha = 210
 
-        self.panel.setStyleSheet(
-            overlay_panel_style(
-                bg_color=self._bg_color,
-                bg_alpha=self._bg_alpha,
-                source_color=self._source_color,
-                translation_color=self._translation_color,
-            )
-        )
-        self._apply_fonts()
+        self._refresh_panel_style()
         self._apply_alignment()
         # Re-apply content visibility under new flags
         self.set_content(
@@ -221,22 +217,44 @@ class OverlayWindow(QWidget):
         size = max(10, int(size))
         self._translation_font_size = size
         self._source_font_size = max(10, size - 2)
-        self._apply_fonts()
+        self._refresh_panel_style()
+
+    def _refresh_panel_style(self) -> None:
+        """Apply colors/fonts via QSS.
+
+        App-level ``MAIN_STYLE`` sets ``font-size`` on ``QWidget``, which makes
+        ``QLabel.setFont()`` and parent-cascaded sizes unreliable. Font size
+        must be set on the labels' own stylesheets.
+        """
+        src_px = max(10, min(72, int(self._source_font_size or 14)))
+        tr_px = max(10, min(72, int(self._translation_font_size or 16)))
+        fam_css = _css_font_family(self._font_family)
+        tr_weight = "700" if self._translation_bold else "400"
+
+        self.panel.setStyleSheet(
+            overlay_panel_style(
+                bg_color=self._bg_color,
+                bg_alpha=self._bg_alpha,
+                source_color=self._source_color,
+                translation_color=self._translation_color,
+                source_font_size=src_px,
+                translation_font_size=tr_px,
+                font_family=self._font_family,
+                translation_bold=self._translation_bold,
+            )
+        )
+        # Label-local QSS (highest priority under app stylesheet).
+        self.source_label.setStyleSheet(
+            f"font-size: {src_px}px; font-weight: 400; color: {self._source_color}; "
+            f"background: transparent; {fam_css}"
+        )
+        self.translation_label.setStyleSheet(
+            f"font-size: {tr_px}px; font-weight: {tr_weight}; "
+            f"color: {self._translation_color}; background: transparent; {fam_css}"
+        )
 
     def _apply_fonts(self) -> None:
-        fam = (self._font_family or "").strip()
-        f_src = QFont()
-        if fam:
-            f_src.setFamily(fam)
-        f_src.setPointSize(self._source_font_size)
-        self.source_label.setFont(f_src)
-
-        f_tr = QFont()
-        if fam:
-            f_tr.setFamily(fam)
-        f_tr.setPointSize(self._translation_font_size)
-        f_tr.setBold(bool(self._translation_bold))
-        self.translation_label.setFont(f_tr)
+        self._refresh_panel_style()
 
     def _apply_alignment(self) -> None:
         if self._text_align == "center":

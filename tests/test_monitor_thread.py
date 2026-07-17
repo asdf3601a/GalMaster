@@ -44,11 +44,11 @@ def test_monitor_stop_exits_thread_quickly(qapp):
     # Let the loop tick once (capture may fail — that's fine)
     time.sleep(0.35)
     t0 = time.monotonic()
-    mon.stop()
+    mon.stop(wait=0.2)
     elapsed = time.monotonic() - t0
     assert not mon.is_running
-    # Cooperative stop should finish well under the old 8s hang
-    assert elapsed < 3.0, f"stop() took {elapsed:.2f}s (thread likely hung)"
+    # Must not block the UI on capture/OCR — short join only
+    assert elapsed < 1.0, f"stop() took {elapsed:.2f}s (blocked too long)"
     # Restart should also work without zombie errors
     mon.start(cfg)
     assert mon.is_running
