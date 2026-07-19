@@ -4,8 +4,11 @@ from app.translate.llm_translator import (
     build_system_prompt,
     build_user_prompt,
     build_vlm_history_messages,
+    build_vlm_ocr_system_prompt,
+    build_vlm_ocr_user_prompt,
     parse_vlm_response,
     sampling_fingerprint,
+    strip_ocr_response,
     _extract_model_ids,
     _normalize_anthropic_base,
     _normalize_openai_base,
@@ -125,6 +128,18 @@ def test_parse_vlm_response():
     src2, tr2 = parse_vlm_response("just a plain translation")
     assert src2 == ""
     assert tr2 == "just a plain translation"
+
+
+def test_vlm_ocr_prompts_and_strip():
+    sys = build_vlm_ocr_system_prompt("keep names")
+    assert "OCR" in sys or "recognized" in sys.lower() or "source text" in sys.lower()
+    assert "keep names" in sys
+    assert "TRANSLATION" not in sys
+    user = build_vlm_ocr_user_prompt("ja")
+    assert "screenshot" in user.lower() or "Transcribe" in user
+    assert strip_ocr_response("```\nhello\n```") == "hello"
+    assert strip_ocr_response("SOURCE: こんにちは\nTRANSLATION: 你好") == "こんにちは"
+    assert strip_ocr_response("plain text") == "plain text"
 
 
 def test_extract_model_ids_openai_shape():

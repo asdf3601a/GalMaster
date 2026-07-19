@@ -102,6 +102,22 @@ def clamp_result_history_lines(value: Any) -> int:
     return max(RESULT_HISTORY_MIN, min(RESULT_HISTORY_MAX, n))
 
 
+LLM_TIMEOUT_MIN = 5.0
+LLM_TIMEOUT_MAX = 120.0
+LLM_TIMEOUT_DEFAULT = 30.0
+
+PIPELINE_MODES: tuple[str, ...] = ("ocr", "vlm", "vlm_ocr")
+
+
+def clamp_llm_timeout_s(value: Any, default: float = LLM_TIMEOUT_DEFAULT) -> float:
+    """Clamp per-endpoint LLM HTTP timeout to 5..120 seconds."""
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        return float(default)
+    return max(LLM_TIMEOUT_MIN, min(LLM_TIMEOUT_MAX, v))
+
+
 def normalize_hex_color(value: Any, default: str) -> str:
     """Normalize to #RRGGBB; invalid values fall back to default."""
     fallback = default if isinstance(default, str) and default.startswith("#") else "#ffffff"
@@ -133,9 +149,65 @@ def _normalize_text_align(value: Any, default: str = "left") -> str:
     return s if s in ("left", "center") else default
 
 
+def _normalize_optional_sampling_fields(obj: Any, fields: tuple[str, ...]) -> None:
+    """Coerce optional float/int sampling fields: empty / bad → None; top_k 0 → None."""
+    for opt in fields:
+        val = getattr(obj, opt, None)
+        if val is None or val == "":
+            setattr(obj, opt, None)
+            continue
+        try:
+            if opt in ("top_k", "seed") or opt.endswith("_top_k") or opt.endswith("_seed"):
+                iv = int(val)
+                if opt.endswith("top_k") or opt == "top_k":
+                    if iv <= 0:
+                        setattr(obj, opt, None)
+                    else:
+                        setattr(obj, opt, iv)
+                else:
+                    setattr(obj, opt, iv)
+            else:
+                setattr(obj, opt, float(val))
+        except (TypeError, ValueError):
+            setattr(obj, opt, None)
+
+
+def _normalize_reasoning_effort(value: Any) -> str:
+    if value is None:
+        return ""
+    e = str(value).strip().lower()
+    return e if e in ("none", "low", "medium", "high") else ""
+
+
+@dataclass(frozen=True)
+class LlmEndpointConfig:
+    """Snapshot of one LLM/VLM API endpoint (translate or vision)."""
+
+    api_provider: str = "xai"
+    api_protocol: str = "openai"
+    api_key: str = ""
+    base_url: str = "https://api.x.ai/v1"
+    model: str = "grok-4-1-fast-non-reasoning"
+    custom_prompt: str = ""
+    anthropic_version: str = "2023-06-01"
+    max_tokens: int = 2048
+    timeout_s: float = LLM_TIMEOUT_DEFAULT
+    temperature: float | None = None
+    top_p: float | None = None
+    top_k: int | None = None
+    frequency_penalty: float | None = None
+    presence_penalty: float | None = None
+    reasoning_effort: str = ""
+    seed: int | None = None
+
+    @property
+    def has_key(self) -> bool:
+        return bool((self.api_key or "").strip())
+
+
 @dataclass
 class AppConfig:
-    # LLM (optional — empty api_key => OCR only)
+    # --- LLM Translate endpoint (optional — empty api_key => OCR only for ocr/vlm_ocr) ---
     # provider: xai | openai | openai_compat | anthropic | anthropic_compat
     api_provider: str = "xai"
     # protocol: openai | anthropic
@@ -146,6 +218,7 @@ class AppConfig:
     custom_prompt: str = ""
     anthropic_version: str = "2023-06-01"
     max_tokens: int = 2048
+    llm_timeout_s: float = LLM_TIMEOUT_DEFAULT
     # Sliding window: how many prior OCR/translation turns to send as LLM context.
     # 0 = current line only (no history).
     context_history_size: int = 3
@@ -158,7 +231,28 @@ class AppConfig:
     reasoning_effort: str = ""  # "", or none|low|medium|high
     seed: int | None = None
 
-    # Pipeline: "ocr" = local OCR then optional text LLM; "vlm" = image → multimodal LLM
+    # --- VLM / vision endpoint (independent of translate; used by vlm + vlm_ocr stage 1) ---
+    vlm_api_provider: str = "xai"
+    vlm_api_protocol: str = "openai"
+    vlm_api_key: str = ""
+    vlm_base_url: str = "https://api.x.ai/v1"
+    vlm_model: str = "grok-4-1-fast-non-reasoning"
+    vlm_custom_prompt: str = ""
+    vlm_anthropic_version: str = "2023-06-01"
+    vlm_max_tokens: int = 2048
+    vlm_timeout_s: float = LLM_TIMEOUT_DEFAULT
+    vlm_temperature: float | None = None
+    vlm_top_p: float | None = None
+    vlm_top_k: int | None = None
+    vlm_frequency_penalty: float | None = None
+    vlm_presence_penalty: float | None = None
+    vlm_reasoning_effort: str = ""
+    vlm_seed: int | None = None
+
+    # Pipeline:
+    #   "ocr"     = local OCR then optional text LLM (translate endpoint)
+    #   "vlm"     = image → multimodal LLM one-shot (vlm endpoint)
+    #   "vlm_ocr" = VLM recognize then text translate (both endpoints)
     pipeline_mode: str = "ocr"
 
     # UI language: "zh-Hant" | "en"
@@ -264,8 +358,77 @@ class AppConfig:
 
     @property
     def has_llm(self) -> bool:
-        """True when translation API is configured."""
+        """True when translation API is configured (alias of has_translate_llm)."""
+        return self.has_translate_llm
+
+    @property
+    def has_translate_llm(self) -> bool:
+        """True when the text-translate endpoint has an API key."""
         return bool((self.api_key or "").strip())
+
+    @property
+    def has_vlm(self) -> bool:
+        """True when the VLM / vision endpoint has an API key."""
+        return bool((self.vlm_api_key or "").strip())
+
+    def translate_endpoint(self) -> LlmEndpointConfig:
+        return LlmEndpointConfig(
+            api_provider=self.api_provider,
+            api_protocol=self.api_protocol,
+            api_key=self.api_key,
+            base_url=self.base_url,
+            model=self.model,
+            custom_prompt=self.custom_prompt,
+            anthropic_version=self.anthropic_version,
+            max_tokens=int(self.max_tokens or 2048),
+            timeout_s=clamp_llm_timeout_s(getattr(self, "llm_timeout_s", LLM_TIMEOUT_DEFAULT)),
+            temperature=self.temperature,
+            top_p=self.top_p,
+            top_k=self.top_k,
+            frequency_penalty=self.frequency_penalty,
+            presence_penalty=self.presence_penalty,
+            reasoning_effort=self.reasoning_effort or "",
+            seed=self.seed,
+        )
+
+    def vlm_endpoint(self) -> LlmEndpointConfig:
+        return LlmEndpointConfig(
+            api_provider=self.vlm_api_provider,
+            api_protocol=self.vlm_api_protocol,
+            api_key=self.vlm_api_key,
+            base_url=self.vlm_base_url,
+            model=self.vlm_model,
+            custom_prompt=self.vlm_custom_prompt,
+            anthropic_version=self.vlm_anthropic_version,
+            max_tokens=int(self.vlm_max_tokens or 2048),
+            timeout_s=clamp_llm_timeout_s(getattr(self, "vlm_timeout_s", LLM_TIMEOUT_DEFAULT)),
+            temperature=self.vlm_temperature,
+            top_p=self.vlm_top_p,
+            top_k=self.vlm_top_k,
+            frequency_penalty=self.vlm_frequency_penalty,
+            presence_penalty=self.vlm_presence_penalty,
+            reasoning_effort=self.vlm_reasoning_effort or "",
+            seed=self.vlm_seed,
+        )
+
+    def copy_translate_to_vlm(self) -> None:
+        """One-shot seed VLM fields from translate (migration / first upgrade)."""
+        self.vlm_api_provider = self.api_provider
+        self.vlm_api_protocol = self.api_protocol
+        self.vlm_api_key = self.api_key
+        self.vlm_base_url = self.base_url
+        self.vlm_model = self.model
+        self.vlm_custom_prompt = self.custom_prompt
+        self.vlm_anthropic_version = self.anthropic_version
+        self.vlm_max_tokens = self.max_tokens
+        self.vlm_timeout_s = getattr(self, "llm_timeout_s", LLM_TIMEOUT_DEFAULT)
+        self.vlm_temperature = self.temperature
+        self.vlm_top_p = self.top_p
+        self.vlm_top_k = self.top_k
+        self.vlm_frequency_penalty = self.frequency_penalty
+        self.vlm_presence_penalty = self.presence_penalty
+        self.vlm_reasoning_effort = self.reasoning_effort
+        self.vlm_seed = self.seed
 
     def region_tuple(self) -> tuple[int, int, int, int]:
         return (self.region_x, self.region_y, self.region_w, self.region_h)
@@ -305,7 +468,7 @@ class AppConfig:
             cfg.monitor_stable_ms = max(0, ms)
             cfg.monitor_wait_stable = cfg.monitor_stable_ms > 0
         mode = (getattr(cfg, "pipeline_mode", "ocr") or "ocr").strip().lower()
-        cfg.pipeline_mode = mode if mode in ("ocr", "vlm") else "ocr"
+        cfg.pipeline_mode = mode if mode in PIPELINE_MODES else "ocr"
         ui_lang = (getattr(cfg, "ui_language", "zh-Hant") or "zh-Hant").strip()
         cfg.ui_language = ui_lang if ui_lang in ("zh-Hant", "en") else "zh-Hant"
         wcm = (getattr(cfg, "window_capture_method", "auto") or "auto").strip().lower()
@@ -318,37 +481,54 @@ class AppConfig:
         cfg.result_history_lines = clamp_result_history_lines(
             getattr(cfg, "result_history_lines", RESULT_HISTORY_DEFAULT)
         )
+        # One-time VLM seed: if config had no vlm_* keys, copy from translate.
+        if not any(str(k).startswith("vlm_") for k in data):
+            cfg.copy_translate_to_vlm()
+
+        cfg.llm_timeout_s = clamp_llm_timeout_s(
+            getattr(cfg, "llm_timeout_s", LLM_TIMEOUT_DEFAULT)
+        )
+        cfg.vlm_timeout_s = clamp_llm_timeout_s(
+            getattr(cfg, "vlm_timeout_s", LLM_TIMEOUT_DEFAULT)
+        )
+        try:
+            cfg.max_tokens = max(64, min(128000, int(getattr(cfg, "max_tokens", 2048) or 2048)))
+        except (TypeError, ValueError):
+            cfg.max_tokens = 2048
+        try:
+            cfg.vlm_max_tokens = max(
+                64, min(128000, int(getattr(cfg, "vlm_max_tokens", 2048) or 2048))
+            )
+        except (TypeError, ValueError):
+            cfg.vlm_max_tokens = 2048
+
         # Coerce optional sampling fields: empty string / bad values → None
-        for opt in (
-            "temperature",
-            "top_p",
-            "top_k",
-            "frequency_penalty",
-            "presence_penalty",
-            "seed",
-        ):
-            val = getattr(cfg, opt, None)
-            if val is None or val == "":
-                setattr(cfg, opt, None)
-                continue
-            try:
-                if opt in ("top_k", "seed"):
-                    iv = int(val)
-                    # top_k 0 means "unset" (same as null)
-                    if opt == "top_k" and iv <= 0:
-                        setattr(cfg, opt, None)
-                    else:
-                        setattr(cfg, opt, iv)
-                else:
-                    setattr(cfg, opt, float(val))
-            except (TypeError, ValueError):
-                setattr(cfg, opt, None)
-        effort = getattr(cfg, "reasoning_effort", None)
-        if effort is None:
-            cfg.reasoning_effort = ""
-        else:
-            e = str(effort).strip().lower()
-            cfg.reasoning_effort = e if e in ("none", "low", "medium", "high") else ""
+        _normalize_optional_sampling_fields(
+            cfg,
+            (
+                "temperature",
+                "top_p",
+                "top_k",
+                "frequency_penalty",
+                "presence_penalty",
+                "seed",
+                "vlm_temperature",
+                "vlm_top_p",
+                "vlm_top_k",
+                "vlm_frequency_penalty",
+                "vlm_presence_penalty",
+                "vlm_seed",
+            ),
+        )
+        cfg.reasoning_effort = _normalize_reasoning_effort(
+            getattr(cfg, "reasoning_effort", None)
+        )
+        cfg.vlm_reasoning_effort = _normalize_reasoning_effort(
+            getattr(cfg, "vlm_reasoning_effort", None)
+        )
+        for proto_attr in ("api_protocol", "vlm_api_protocol"):
+            p = (getattr(cfg, proto_attr, "openai") or "openai").strip().lower()
+            setattr(cfg, proto_attr, p if p in ("openai", "anthropic") else "openai")
         try:
             cfg.obs_port = max(1, min(65535, int(getattr(cfg, "obs_port", 8765) or 8765)))
         except (TypeError, ValueError):
@@ -549,6 +729,8 @@ def _read_json_config(path: Path) -> AppConfig | None:
             cfg = AppConfig.from_dict(data)
             if cfg.api_key:
                 cfg.api_key = _decode_api_key(cfg.api_key)
+            if cfg.vlm_api_key:
+                cfg.vlm_api_key = _decode_api_key(cfg.vlm_api_key)
             return cfg
     except (OSError, json.JSONDecodeError, TypeError, ValueError):
         return None
@@ -609,6 +791,31 @@ def load_config(path: Path | None = None) -> AppConfig:
     env_provider = os.environ.get("LLM_PROVIDER")
     if env_provider:
         cfg.api_provider = env_provider
+
+    # VLM-specific env (independent); only fill empty fields
+    if not cfg.vlm_api_key:
+        for name in (
+            "VLM_API_KEY",
+            "XAI_API_KEY",
+            "OPENAI_API_KEY",
+            "ANTHROPIC_API_KEY",
+        ):
+            val = os.environ.get(name)
+            if val:
+                cfg.vlm_api_key = val
+                break
+    env_vlm_url = os.environ.get("VLM_BASE_URL")
+    if env_vlm_url:
+        cfg.vlm_base_url = env_vlm_url
+    env_vlm_model = os.environ.get("VLM_MODEL")
+    if env_vlm_model:
+        cfg.vlm_model = env_vlm_model
+    env_vlm_proto = os.environ.get("VLM_PROTOCOL")
+    if env_vlm_proto in ("openai", "anthropic"):
+        cfg.vlm_api_protocol = env_vlm_proto
+    env_vlm_provider = os.environ.get("VLM_PROVIDER")
+    if env_vlm_provider:
+        cfg.vlm_api_provider = env_vlm_provider
     return cfg
 
 
@@ -616,12 +823,13 @@ def save_config(cfg: AppConfig, path: Path | None = None) -> None:
     cfg_path = path or default_config_path()
     cfg_path.parent.mkdir(parents=True, exist_ok=True)
     payload = deepcopy(cfg.to_dict())
-    # Prefer DPAPI-encrypted api_key on disk; fall back to plaintext if unavailable
-    key = (payload.get("api_key") or "").strip()
-    if key and not key.startswith(_DPAPI_PREFIX):
-        protected = _dpapi_protect(key)
-        if protected:
-            payload["api_key"] = protected
+    # Prefer DPAPI-encrypted api keys on disk; fall back to plaintext if unavailable
+    for key_name in ("api_key", "vlm_api_key"):
+        key = (payload.get(key_name) or "").strip()
+        if key and not key.startswith(_DPAPI_PREFIX):
+            protected = _dpapi_protect(key)
+            if protected:
+                payload[key_name] = protected
     cfg_path.write_text(
         json.dumps(payload, ensure_ascii=False, indent=2),
         encoding="utf-8",

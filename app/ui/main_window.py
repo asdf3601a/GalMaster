@@ -78,7 +78,8 @@ class MainWindow(QMainWindow):
     exit_requested = Signal()
     hide_to_tray_requested = Signal()
     copy_obs_url_clicked = Signal()
-    refresh_models_clicked = Signal()
+    # role: "translate" | "vlm"
+    refresh_models_clicked = Signal(str)
 
     def __init__(self, cfg: AppConfig) -> None:
         super().__init__()
@@ -125,12 +126,16 @@ class MainWindow(QMainWindow):
         root.setSpacing(8)
         root.setContentsMargins(0, 0, 0, 0)
 
+        # Pipeline order: Detect → Capture → Process → Present → App
+        root.addWidget(self._build_detect_group(cfg))
         root.addWidget(self._build_capture_group(cfg))
-        root.addWidget(self._build_lang_group(cfg))
+        root.addWidget(self._build_process_group(cfg))
+        root.addWidget(self._build_recognize_group(cfg))
         root.addWidget(self._build_llm_group(cfg))
-        root.addWidget(self._build_display_group(cfg))
+        root.addWidget(self._build_overlay_group(cfg))
         root.addWidget(self._build_obs_group(cfg))
         root.addWidget(self._build_result_group())
+        root.addWidget(self._build_app_group(cfg))
         root.addWidget(self._build_footer())
         root.addStretch(0)
 
@@ -221,10 +226,13 @@ class MainWindow(QMainWindow):
         w.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         w.setMinimumWidth(0)
 
-    def _build_capture_group(self, cfg: AppConfig) -> QGroupBox:
-        self.cap_group = QGroupBox()
-        cap_l = QVBoxLayout(self.cap_group)
-        cap_l.setSpacing(6)
+    def _build_detect_group(self, cfg: AppConfig) -> QGroupBox:
+        """Detect stage: bind target + region + monitor timing."""
+        self.detect_group = QGroupBox()
+        # Keep legacy alias used by retranslate / external refs
+        self.cap_group = self.detect_group
+        det_l = QVBoxLayout(self.detect_group)
+        det_l.setSpacing(6)
 
         row = QHBoxLayout()
         self.window_combo = NoWheelComboBox()
@@ -237,66 +245,18 @@ class MainWindow(QMainWindow):
         self.btn_refresh.setObjectName("secondary")
         self.btn_refresh.clicked.connect(self._on_refresh)
         row.addWidget(self.btn_refresh)
-        cap_l.addLayout(row)
+        det_l.addLayout(row)
 
-        row2 = QHBoxLayout()
         self.btn_region = QPushButton()
         self.btn_region.clicked.connect(self.select_region_clicked.emit)
-        row2.addWidget(self.btn_region)
-        self.btn_translate = QPushButton()
-        self.btn_translate.clicked.connect(self.translate_now_clicked.emit)
-        row2.addWidget(self.btn_translate)
-        cap_l.addLayout(row2)
+        det_l.addWidget(self.btn_region)
 
         self.region_label = QLabel()
         self.region_label.setObjectName("hint")
         self.region_label.setWordWrap(True)
         self._update_region_label()
-        cap_l.addWidget(self.region_label)
+        det_l.addWidget(self.region_label)
 
-        # Pipeline + OCR + window capture method (same form — VLM disables OCR nearby)
-        pipe = QFormLayout()
-        pipe.setSpacing(6)
-        pipe.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
-
-        self.pipeline_mode_combo = NoWheelComboBox()
-        self.pipeline_mode_combo.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
-        self._expand_field(self.pipeline_mode_combo)
-        self.pipeline_mode_combo.addItem("", "ocr")
-        self.pipeline_mode_combo.addItem("", "vlm")
-        self._set_combo(
-            self.pipeline_mode_combo,
-            (getattr(cfg, "pipeline_mode", "ocr") or "ocr"),
-        )
-        self.pipeline_mode_combo.currentIndexChanged.connect(self._mark_dirty)
-        self.pipeline_mode_combo.currentIndexChanged.connect(self._on_pipeline_mode_changed)
-        self._add_form_label(pipe, "label.pipeline_mode", self.pipeline_mode_combo)
-
-        self.ocr_combo = NoWheelComboBox()
-        self.ocr_combo.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
-        self._expand_field(self.ocr_combo)
-        for code in ("oneocr", "manga", "rapid", "paddle"):
-            self.ocr_combo.addItem(code, code)
-        self._set_combo(
-            self.ocr_combo, normalize_ocr_engine(cfg.ocr_engine or DEFAULT_OCR_ENGINE)
-        )
-        self.ocr_combo.currentIndexChanged.connect(self._mark_dirty)
-        self._add_form_label(pipe, "label.ocr", self.ocr_combo)
-
-        self.capture_method_combo = NoWheelComboBox()
-        self.capture_method_combo.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
-        self._expand_field(self.capture_method_combo)
-        for code in ("auto", "wgc", "bitblt"):
-            self.capture_method_combo.addItem(code, code)
-        self._set_combo(
-            self.capture_method_combo,
-            str(getattr(cfg, "window_capture_method", "auto") or "auto"),
-        )
-        self.capture_method_combo.currentIndexChanged.connect(self._mark_dirty)
-        self._add_form_label(pipe, "label.capture_method", self.capture_method_combo)
-        cap_l.addLayout(pipe)
-
-        # Auto-monitor timing (used immediately on Start; also Apply/Save)
         mon = QFormLayout()
         mon.setSpacing(6)
         mon.setLabelAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
@@ -339,24 +299,6 @@ class MainWindow(QMainWindow):
         self.cooldown_spin.valueChanged.connect(self._mark_dirty)
         self._add_form_label(mon, "label.cooldown", self.cooldown_spin)
 
-        self.buffer_spin = NoWheelSpinBox()
-        self.buffer_spin.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
-        self.buffer_spin.setRange(1, 16)
-        self.buffer_spin.setSingleStep(1)
-        self.buffer_spin.setAlignment(Qt.AlignmentFlag.AlignLeft)
-        self._expand_field(self.buffer_spin)
-        try:
-            from app.config import clamp_pipeline_buffer_size
-
-            buf_n = clamp_pipeline_buffer_size(
-                getattr(cfg, "pipeline_buffer_size", 3)
-            )
-        except Exception:
-            buf_n = 3
-        self.buffer_spin.setValue(buf_n)
-        self.buffer_spin.valueChanged.connect(self._mark_dirty)
-        self._add_form_label(mon, "label.pipeline_buffer", self.buffer_spin)
-
         self.threshold_spin = NoWheelDoubleSpinBox()
         self.threshold_spin.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.threshold_spin.setRange(0.0, 0.5)
@@ -373,7 +315,36 @@ class MainWindow(QMainWindow):
         self.monitor_hint.setWordWrap(True)
         mon.addRow(self.monitor_hint)
 
-        cap_l.addLayout(mon)
+        det_l.addLayout(mon)
+        self.window_combo.currentIndexChanged.connect(self._on_window_selected)
+        return self.detect_group
+
+    def _build_capture_group(self, cfg: AppConfig) -> QGroupBox:
+        """Capture stage: method, force translate, preview."""
+        self.capture_group = QGroupBox()
+        cap_l = QVBoxLayout(self.capture_group)
+        cap_l.setSpacing(6)
+
+        form = QFormLayout()
+        form.setSpacing(6)
+        form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
+
+        self.capture_method_combo = NoWheelComboBox()
+        self.capture_method_combo.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self._expand_field(self.capture_method_combo)
+        for code in ("auto", "wgc", "bitblt"):
+            self.capture_method_combo.addItem(code, code)
+        self._set_combo(
+            self.capture_method_combo,
+            str(getattr(cfg, "window_capture_method", "auto") or "auto"),
+        )
+        self.capture_method_combo.currentIndexChanged.connect(self._mark_dirty)
+        self._add_form_label(form, "label.capture_method", self.capture_method_combo)
+        cap_l.addLayout(form)
+
+        self.btn_translate = QPushButton()
+        self.btn_translate.clicked.connect(self.translate_now_clicked.emit)
+        cap_l.addWidget(self.btn_translate)
 
         self.lbl_preview = QLabel()
         self.lbl_preview.setObjectName("hint")
@@ -387,13 +358,33 @@ class MainWindow(QMainWindow):
         self.preview_label.setText(tr("hint.preview_empty"))
         self.preview_label.setScaledContents(False)
         cap_l.addWidget(self.preview_label)
+        return self.capture_group
 
-        self.window_combo.currentIndexChanged.connect(self._on_window_selected)
-        return self.cap_group
+    def _build_process_group(self, cfg: AppConfig) -> QGroupBox:
+        """Process header: pipeline mode, languages, process buffer."""
+        self.process_group = QGroupBox()
+        # Legacy alias for language row styling / retranslate fallbacks
+        self.lang_group = self.process_group
+        form = QFormLayout(self.process_group)
+        form.setSpacing(6)
+        form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
 
-    def _build_lang_group(self, cfg: AppConfig) -> QGroupBox:
-        self.lang_group = QGroupBox()
-        row = QHBoxLayout(self.lang_group)
+        self.pipeline_mode_combo = NoWheelComboBox()
+        self.pipeline_mode_combo.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self._expand_field(self.pipeline_mode_combo)
+        self.pipeline_mode_combo.addItem("", "ocr")
+        self.pipeline_mode_combo.addItem("", "vlm")
+        self.pipeline_mode_combo.addItem("", "vlm_ocr")
+        self._set_combo(
+            self.pipeline_mode_combo,
+            (getattr(cfg, "pipeline_mode", "ocr") or "ocr"),
+        )
+        self.pipeline_mode_combo.currentIndexChanged.connect(self._mark_dirty)
+        self.pipeline_mode_combo.currentIndexChanged.connect(
+            self._on_pipeline_mode_changed
+        )
+        self._add_form_label(form, "label.pipeline_mode", self.pipeline_mode_combo)
+
         self.source_combo = NoWheelComboBox()
         self.target_combo = NoWheelComboBox()
         self.source_combo.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
@@ -408,12 +399,37 @@ class MainWindow(QMainWindow):
         self.target_combo.currentIndexChanged.connect(self._mark_dirty)
         self.lbl_source = QLabel()
         self.lbl_target = QLabel()
-        row.addWidget(self.lbl_source)
-        row.addWidget(self.source_combo, 1)
-        row.addWidget(QLabel("→"))
-        row.addWidget(self.lbl_target)
-        row.addWidget(self.target_combo, 1)
-        return self.lang_group
+        lang_row = QHBoxLayout()
+        lang_row.setContentsMargins(0, 0, 0, 0)
+        lang_row.setSpacing(6)
+        lang_row.addWidget(self.lbl_source)
+        lang_row.addWidget(self.source_combo, 1)
+        lang_row.addWidget(QLabel("→"))
+        lang_row.addWidget(self.lbl_target)
+        lang_row.addWidget(self.target_combo, 1)
+        lang_wrap = QWidget()
+        lang_wrap.setLayout(lang_row)
+        form.addRow(lang_wrap)
+
+        self.buffer_spin = NoWheelSpinBox()
+        self.buffer_spin.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.buffer_spin.setRange(1, 16)
+        self.buffer_spin.setSingleStep(1)
+        self.buffer_spin.setAlignment(Qt.AlignmentFlag.AlignLeft)
+        self._expand_field(self.buffer_spin)
+        try:
+            from app.config import clamp_pipeline_buffer_size
+
+            buf_n = clamp_pipeline_buffer_size(
+                getattr(cfg, "pipeline_buffer_size", 3)
+            )
+        except Exception:
+            buf_n = 3
+        self.buffer_spin.setValue(buf_n)
+        self.buffer_spin.valueChanged.connect(self._mark_dirty)
+        self._add_form_label(form, "label.pipeline_buffer", self.buffer_spin)
+
+        return self.process_group
 
     def _make_optional_float(
         self,
@@ -550,7 +566,9 @@ class MainWindow(QMainWindow):
 
         self.btn_refresh_models = QPushButton()
         self.btn_refresh_models.setObjectName("secondary")
-        self.btn_refresh_models.clicked.connect(self.refresh_models_clicked.emit)
+        self.btn_refresh_models.clicked.connect(
+            lambda: self.refresh_models_clicked.emit("translate")
+        )
 
         model_row = QHBoxLayout()
         model_row.setContentsMargins(0, 0, 0, 0)
@@ -591,6 +609,18 @@ class MainWindow(QMainWindow):
         self.max_tokens_spin.setValue(int(getattr(cfg, "max_tokens", 2048) or 2048))
         self.max_tokens_spin.valueChanged.connect(self._mark_dirty)
         self._add_form_label(form, "label.max_tokens", self.max_tokens_spin)
+
+        self.timeout_spin = NoWheelDoubleSpinBox()
+        self.timeout_spin.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.timeout_spin.setRange(5.0, 120.0)
+        self.timeout_spin.setDecimals(0)
+        self.timeout_spin.setSingleStep(5.0)
+        self._expand_field(self.timeout_spin)
+        self.timeout_spin.setValue(
+            float(getattr(cfg, "llm_timeout_s", 30) or 30)
+        )
+        self.timeout_spin.valueChanged.connect(self._mark_dirty)
+        self._add_form_label(form, "label.llm_timeout", self.timeout_spin)
 
         # Advanced optional sampling
         self.adv_group = QGroupBox()
@@ -687,24 +717,245 @@ class MainWindow(QMainWindow):
         self._sync_api_meta_from_provider(apply_defaults=False)
         return self.llm_group
 
-    def _build_display_group(self, cfg: AppConfig) -> QGroupBox:
-        self.display_group = QGroupBox()
-        form = QFormLayout(self.display_group)
+    def _build_recognize_group(self, cfg: AppConfig) -> QGroupBox:
+        """Recognition: local OCR panel and/or VLM panel (visibility by mode)."""
+        self.recognize_group = QGroupBox()
+        # Legacy alias
+        self.vlm_group = self.recognize_group
+        outer = QVBoxLayout(self.recognize_group)
+        outer.setSpacing(6)
+        outer.setContentsMargins(8, 10, 8, 8)
+
+        self.recognize_hint = QLabel()
+        self.recognize_hint.setObjectName("hint")
+        self.recognize_hint.setWordWrap(True)
+        outer.addWidget(self.recognize_hint)
+
+        # --- Local OCR engine (mode=ocr only) ---
+        self.local_ocr_panel = QWidget()
+        local_form = QFormLayout(self.local_ocr_panel)
+        local_form.setContentsMargins(0, 0, 0, 0)
+        local_form.setSpacing(6)
+        local_form.setFieldGrowthPolicy(
+            QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow
+        )
+
+        self.ocr_combo = NoWheelComboBox()
+        self.ocr_combo.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self._expand_field(self.ocr_combo)
+        for code in ("oneocr", "manga", "rapid", "paddle"):
+            self.ocr_combo.addItem(code, code)
+        self._set_combo(
+            self.ocr_combo, normalize_ocr_engine(cfg.ocr_engine or DEFAULT_OCR_ENGINE)
+        )
+        self.ocr_combo.currentIndexChanged.connect(self._mark_dirty)
+        self._add_form_label(local_form, "label.local_ocr", self.ocr_combo)
+        outer.addWidget(self.local_ocr_panel)
+
+        # --- VLM endpoint (mode=vlm | vlm_ocr) ---
+        self.vlm_panel = QWidget()
+        form = QFormLayout(self.vlm_panel)
+        form.setContentsMargins(0, 0, 0, 0)
         form.setSpacing(6)
         form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
 
-        self.ui_lang_combo = NoWheelComboBox()
-        self.ui_lang_combo.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
-        for code, name in available_languages():
-            self.ui_lang_combo.addItem(name, code)
-        self._set_combo(self.ui_lang_combo, getattr(cfg, "ui_language", "zh-Hant") or "zh-Hant")
-        self.ui_lang_combo.currentIndexChanged.connect(self._mark_dirty)
-        self._add_form_label(form, "label.ui_language", self.ui_lang_combo)
+        self.vlm_optional_hint = QLabel()
+        self.vlm_optional_hint.setObjectName("hint")
+        self.vlm_optional_hint.setWordWrap(True)
+        form.addRow(self.vlm_optional_hint)
 
-        self.hotkey_edit = QLineEdit(cfg.hotkey)
-        self._expand_field(self.hotkey_edit)
-        self.hotkey_edit.textChanged.connect(self._mark_dirty)
-        self._add_form_label(form, "label.hotkey", self.hotkey_edit)
+        self.vlm_provider_combo = NoWheelComboBox()
+        self.vlm_provider_combo.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        for p in PROVIDER_PRESETS:
+            self.vlm_provider_combo.addItem(p.label, p.id)
+        self._set_combo(
+            self.vlm_provider_combo,
+            getattr(cfg, "vlm_api_provider", "xai") or "xai",
+        )
+        self.vlm_provider_combo.currentIndexChanged.connect(self._on_vlm_provider_changed)
+
+        self.vlm_api_meta_label = QLabel("")
+        self.vlm_api_meta_label.setObjectName("hint")
+        self.vlm_api_meta_label.setWordWrap(True)
+
+        self.vlm_api_key_edit = QLineEdit(getattr(cfg, "vlm_api_key", "") or "")
+        self.vlm_api_key_edit.setEchoMode(QLineEdit.EchoMode.Password)
+        self.vlm_api_key_edit.textChanged.connect(self._mark_dirty)
+
+        self.vlm_base_url_edit = QLineEdit(getattr(cfg, "vlm_base_url", "") or "")
+        self.vlm_base_url_edit.setPlaceholderText("https://…")
+        self.vlm_base_url_edit.textChanged.connect(self._mark_dirty)
+
+        self.vlm_model_combo = NoWheelComboBox()
+        self.vlm_model_combo.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.vlm_model_combo.setEditable(True)
+        self.vlm_model_combo.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
+        self.vlm_model_combo.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
+        )
+        if self.vlm_model_combo.lineEdit() is not None:
+            self.vlm_model_combo.lineEdit().setText(
+                getattr(cfg, "vlm_model", "") or ""
+            )
+            self.vlm_model_combo.lineEdit().textChanged.connect(self._mark_dirty)
+        self.vlm_model_combo.currentIndexChanged.connect(self._on_vlm_model_combo_changed)
+        self._vlm_model_ids: list[str] = []
+
+        self.btn_vlm_refresh_models = QPushButton()
+        self.btn_vlm_refresh_models.setObjectName("secondary")
+        self.btn_vlm_refresh_models.clicked.connect(
+            lambda: self.refresh_models_clicked.emit("vlm")
+        )
+
+        vlm_model_row = QHBoxLayout()
+        vlm_model_row.setContentsMargins(0, 0, 0, 0)
+        vlm_model_row.setSpacing(6)
+        vlm_model_row.addWidget(self.vlm_model_combo, 1)
+        vlm_model_row.addWidget(self.btn_vlm_refresh_models)
+        self.vlm_model_row_wrap = QWidget()
+        self.vlm_model_row_wrap.setLayout(vlm_model_row)
+
+        self.vlm_models_status_label = QLabel("")
+        self.vlm_models_status_label.setObjectName("hint")
+        self.vlm_models_status_label.setWordWrap(True)
+
+        self.vlm_prompt_edit = QLineEdit(getattr(cfg, "vlm_custom_prompt", "") or "")
+        self.vlm_prompt_edit.textChanged.connect(self._mark_dirty)
+
+        self._add_form_label(form, "label.provider", self.vlm_provider_combo)
+        form.addRow("", self.vlm_api_meta_label)
+        self._add_form_label(form, "label.api_key", self.vlm_api_key_edit)
+        self._add_form_label(form, "label.base_url", self.vlm_base_url_edit)
+        self._add_form_label(form, "label.model", self.vlm_model_row_wrap)
+        form.addRow("", self.vlm_models_status_label)
+        self._add_form_label(form, "label.custom_prompt", self.vlm_prompt_edit)
+
+        self.vlm_max_tokens_spin = NoWheelSpinBox()
+        self.vlm_max_tokens_spin.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.vlm_max_tokens_spin.setRange(64, 128000)
+        self.vlm_max_tokens_spin.setSingleStep(256)
+        self._expand_field(self.vlm_max_tokens_spin)
+        self.vlm_max_tokens_spin.setValue(
+            int(getattr(cfg, "vlm_max_tokens", 2048) or 2048)
+        )
+        self.vlm_max_tokens_spin.valueChanged.connect(self._mark_dirty)
+        self._add_form_label(form, "label.max_tokens", self.vlm_max_tokens_spin)
+
+        self.vlm_timeout_spin = NoWheelDoubleSpinBox()
+        self.vlm_timeout_spin.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.vlm_timeout_spin.setRange(5.0, 120.0)
+        self.vlm_timeout_spin.setDecimals(0)
+        self.vlm_timeout_spin.setSingleStep(5.0)
+        self._expand_field(self.vlm_timeout_spin)
+        self.vlm_timeout_spin.setValue(
+            float(getattr(cfg, "vlm_timeout_s", 30) or 30)
+        )
+        self.vlm_timeout_spin.valueChanged.connect(self._mark_dirty)
+        self._add_form_label(form, "label.llm_timeout", self.vlm_timeout_spin)
+
+        self.vlm_adv_group = QGroupBox()
+        self.vlm_adv_group.setCheckable(False)
+        vadv = QFormLayout(self.vlm_adv_group)
+        vadv.setSpacing(4)
+
+        vtemp = getattr(cfg, "vlm_temperature", None)
+        self.vlm_temp_chk, self.vlm_temp_spin, vtemp_w = self._make_optional_float(
+            minimum=0.0,
+            maximum=2.0,
+            step=0.05,
+            decimals=2,
+            default=float(vtemp) if vtemp is not None else 0.2,
+            enabled=vtemp is not None,
+        )
+        self._add_form_label(vadv, "label.temperature", vtemp_w)
+
+        vtopp = getattr(cfg, "vlm_top_p", None)
+        self.vlm_topp_chk, self.vlm_topp_spin, vtopp_w = self._make_optional_float(
+            minimum=0.0,
+            maximum=1.0,
+            step=0.05,
+            decimals=2,
+            default=float(vtopp) if vtopp is not None else 1.0,
+            enabled=vtopp is not None,
+        )
+        self._add_form_label(vadv, "label.top_p", vtopp_w)
+
+        vtopk = getattr(cfg, "vlm_top_k", None)
+        self.vlm_topk_chk, self.vlm_topk_spin, vtopk_w = self._make_optional_int(
+            minimum=1,
+            maximum=200,
+            step=1,
+            default=int(vtopk) if vtopk is not None else 40,
+            enabled=vtopk is not None and int(vtopk) > 0,
+        )
+        self._add_form_label(vadv, "label.top_k", vtopk_w)
+
+        vfp = getattr(cfg, "vlm_frequency_penalty", None)
+        self.vlm_fp_chk, self.vlm_fp_spin, vfp_w = self._make_optional_float(
+            minimum=-2.0,
+            maximum=2.0,
+            step=0.1,
+            decimals=2,
+            default=float(vfp) if vfp is not None else 0.0,
+            enabled=vfp is not None,
+        )
+        self._add_form_label(vadv, "label.freq_penalty", vfp_w)
+
+        vpp = getattr(cfg, "vlm_presence_penalty", None)
+        self.vlm_pp_chk, self.vlm_pp_spin, vpp_w = self._make_optional_float(
+            minimum=-2.0,
+            maximum=2.0,
+            step=0.1,
+            decimals=2,
+            default=float(vpp) if vpp is not None else 0.0,
+            enabled=vpp is not None,
+        )
+        self._add_form_label(vadv, "label.pres_penalty", vpp_w)
+
+        vseed = getattr(cfg, "vlm_seed", None)
+        self.vlm_seed_chk, self.vlm_seed_spin, vseed_w = self._make_optional_int(
+            minimum=0,
+            maximum=2_147_483_647,
+            step=1,
+            default=int(vseed) if vseed is not None else 0,
+            enabled=vseed is not None,
+        )
+        self._add_form_label(vadv, "label.seed", vseed_w)
+
+        vraw = (getattr(cfg, "vlm_reasoning_effort", "") or "").strip().lower()
+        veff = vraw in ("none", "low", "medium", "high")
+        self.vlm_reasoning_chk, self.vlm_reasoning_combo, vre_w = (
+            self._make_optional_combo(
+                items=[
+                    ("none", "none"),
+                    ("low", "low"),
+                    ("medium", "medium"),
+                    ("high", "high"),
+                ],
+                current=vraw if veff else "none",
+                enabled=veff,
+            )
+        )
+        self._add_form_label(vadv, "label.reasoning", vre_w)
+
+        self.vlm_sampling_hint = QLabel()
+        self.vlm_sampling_hint.setObjectName("hint")
+        self.vlm_sampling_hint.setWordWrap(True)
+        vadv.addRow(self.vlm_sampling_hint)
+
+        form.addRow(self.vlm_adv_group)
+        outer.addWidget(self.vlm_panel)
+        self._sync_vlm_api_meta_from_provider(apply_defaults=False)
+        return self.recognize_group
+
+    def _build_overlay_group(self, cfg: AppConfig) -> QGroupBox:
+        """Present: Overlay appearance."""
+        self.overlay_group = QGroupBox()
+        # Legacy alias
+        self.display_group = self.overlay_group
+        form = QFormLayout(self.overlay_group)
+        form.setSpacing(6)
+        form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
 
         self.ov_hint = QLabel()
         self.ov_hint.setObjectName("hint")
@@ -858,17 +1109,34 @@ class MainWindow(QMainWindow):
         self.click_through_check.toggled.connect(self._mark_dirty)
         form.addRow("", self.click_through_check)
 
-        row_btn = QHBoxLayout()
         self.btn_overlay = QPushButton()
         self.btn_overlay.setObjectName("secondary")
         self.btn_overlay.clicked.connect(self.toggle_overlay_clicked.emit)
-        self.btn_cache = QPushButton()
-        self.btn_cache.setObjectName("secondary")
-        self.btn_cache.clicked.connect(self.clear_cache_clicked.emit)
-        row_btn.addWidget(self.btn_overlay)
-        row_btn.addWidget(self.btn_cache)
-        form.addRow(row_btn)
-        return self.display_group
+        form.addRow(self.btn_overlay)
+        return self.overlay_group
+
+    def _build_app_group(self, cfg: AppConfig) -> QGroupBox:
+        """App-level settings: UI language, hotkey."""
+        self.app_group = QGroupBox()
+        form = QFormLayout(self.app_group)
+        form.setSpacing(6)
+        form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
+
+        self.ui_lang_combo = NoWheelComboBox()
+        self.ui_lang_combo.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        for code, name in available_languages():
+            self.ui_lang_combo.addItem(name, code)
+        self._set_combo(
+            self.ui_lang_combo, getattr(cfg, "ui_language", "zh-Hant") or "zh-Hant"
+        )
+        self.ui_lang_combo.currentIndexChanged.connect(self._mark_dirty)
+        self._add_form_label(form, "label.ui_language", self.ui_lang_combo)
+
+        self.hotkey_edit = QLineEdit(cfg.hotkey)
+        self._expand_field(self.hotkey_edit)
+        self.hotkey_edit.textChanged.connect(self._mark_dirty)
+        self._add_form_label(form, "label.hotkey", self.hotkey_edit)
+        return self.app_group
 
     def _build_obs_group(self, cfg: AppConfig) -> QGroupBox:
         self.obs_group = QGroupBox()
@@ -1073,6 +1341,10 @@ class MainWindow(QMainWindow):
         head.addWidget(self.lbl_result_history)
         head.addWidget(self.result_history_spin)
         head.addStretch(1)
+        self.btn_cache = QPushButton()
+        self.btn_cache.setObjectName("secondary")
+        self.btn_cache.clicked.connect(self.clear_cache_clicked.emit)
+        head.addWidget(self.btn_cache)
         res_l.addLayout(head)
 
         self.result_view = QTextEdit()
@@ -1135,17 +1407,29 @@ class MainWindow(QMainWindow):
         self.btn_cancel.setToolTip(tr("tip.cancel"))
         self.settings_hint.setText(tr("hint.dirty") if dirty else tr("hint.apply_or_save"))
 
-        self.cap_group.setTitle(tr("group.capture"))
-        self.lang_group.setTitle(tr("group.lang"))
-        self.llm_group.setTitle(tr("group.llm"))
-        self.display_group.setTitle(tr("group.display"))
-        self.obs_group.setTitle(tr("group.obs"))
-        self.result_group.setTitle(tr("group.result"))
+        if hasattr(self, "detect_group"):
+            self.detect_group.setTitle(tr("group.detect"))
+        if hasattr(self, "capture_group"):
+            self.capture_group.setTitle(tr("group.capture"))
+        if hasattr(self, "process_group"):
+            self.process_group.setTitle(tr("group.process"))
+        # recognize_group title is mode-dependent (set in _on_pipeline_mode_changed)
+        self.llm_group.setTitle(tr("group.llm_translate"))
+        if hasattr(self, "overlay_group"):
+            self.overlay_group.setTitle(tr("group.present_overlay"))
+        elif hasattr(self, "display_group"):
+            self.display_group.setTitle(tr("group.present_overlay"))
+        self.obs_group.setTitle(tr("group.present_obs"))
+        self.result_group.setTitle(tr("group.present_result"))
+        if hasattr(self, "app_group"):
+            self.app_group.setTitle(tr("group.app"))
         if hasattr(self, "lbl_result_history"):
             self.lbl_result_history.setText(tr("label.result_history"))
         if hasattr(self, "result_history_spin"):
             self.result_history_spin.setToolTip(tr("tip.result_history"))
         self.adv_group.setTitle(tr("group.llm_advanced"))
+        if hasattr(self, "vlm_adv_group"):
+            self.vlm_adv_group.setTitle(tr("group.llm_advanced"))
 
         self.btn_refresh.setText(tr("btn.refresh"))
         self.btn_region.setText(tr("btn.region"))
@@ -1158,9 +1442,14 @@ class MainWindow(QMainWindow):
         self.btn_copy_obs.setText(tr("btn.copy_url"))
         self.btn_refresh_models.setText(tr("btn.refresh_models"))
         self.btn_refresh_models.setToolTip(tr("tip.refresh_models"))
+        if hasattr(self, "btn_vlm_refresh_models"):
+            self.btn_vlm_refresh_models.setText(tr("btn.refresh_models"))
+            self.btn_vlm_refresh_models.setToolTip(tr("tip.refresh_models"))
 
         self.pipeline_mode_combo.setItemText(0, tr("mode.ocr"))
         self.pipeline_mode_combo.setItemText(1, tr("mode.vlm"))
+        if self.pipeline_mode_combo.count() > 2:
+            self.pipeline_mode_combo.setItemText(2, tr("mode.vlm_ocr"))
         self.pipeline_mode_combo.setToolTip(tr("tip.pipeline_mode"))
         self.lbl_preview.setText(tr("label.preview"))
         if not self.preview_label.pixmap() or self.preview_label.pixmap().isNull():
@@ -1168,11 +1457,23 @@ class MainWindow(QMainWindow):
 
         self.lbl_source.setText(tr("label.source"))
         self.lbl_target.setText(tr("label.target"))
-        self.llm_optional_hint.setText(tr("hint.llm_optional"))
         self.prompt_edit.setPlaceholderText(tr("hint.prompt"))
         self.api_key_edit.setPlaceholderText(tr("hint.api_key"))
+        if hasattr(self, "vlm_api_key_edit"):
+            self.vlm_api_key_edit.setPlaceholderText(tr("hint.vlm_api_key"))
+        if hasattr(self, "vlm_prompt_edit"):
+            self.vlm_prompt_edit.setPlaceholderText(tr("hint.vlm_prompt"))
         self.context_spin.setToolTip(tr("tip.context"))
-        self.sampling_hint.setText(tr("tip.sampling"))
+        if hasattr(self, "timeout_spin"):
+            self.timeout_spin.setToolTip(tr("tip.llm_timeout"))
+        if hasattr(self, "vlm_timeout_spin"):
+            self.vlm_timeout_spin.setToolTip(tr("tip.llm_timeout"))
+        if hasattr(self, "sampling_hint"):
+            self.sampling_hint.setText(tr("tip.sampling"))
+        if hasattr(self, "vlm_sampling_hint"):
+            self.vlm_sampling_hint.setText(tr("tip.sampling"))
+        # Mode-dependent hints (recognize / translate)
+        self._on_pipeline_mode_changed()
 
         self.ov_hint.setText(tr("hint.overlay"))
         self.ov_show_source_check.setText(tr("label.show_source"))
@@ -1288,6 +1589,31 @@ class MainWindow(QMainWindow):
             self.prompt_edit.setText(cfg.custom_prompt or "")
             self.context_spin.setValue(int(getattr(cfg, "context_history_size", 3) or 0))
             self.max_tokens_spin.setValue(int(getattr(cfg, "max_tokens", 2048) or 2048))
+            if hasattr(self, "timeout_spin"):
+                self.timeout_spin.setValue(
+                    float(getattr(cfg, "llm_timeout_s", 30) or 30)
+                )
+            # VLM endpoint
+            if hasattr(self, "vlm_provider_combo"):
+                self._set_combo(
+                    self.vlm_provider_combo,
+                    getattr(cfg, "vlm_api_provider", "xai") or "xai",
+                )
+                self._sync_vlm_api_meta_from_provider(apply_defaults=False)
+                self.vlm_api_key_edit.setText(getattr(cfg, "vlm_api_key", "") or "")
+                self.vlm_base_url_edit.setText(getattr(cfg, "vlm_base_url", "") or "")
+                self.set_model_text(
+                    getattr(cfg, "vlm_model", "") or "", role="vlm"
+                )
+                self.vlm_prompt_edit.setText(
+                    getattr(cfg, "vlm_custom_prompt", "") or ""
+                )
+                self.vlm_max_tokens_spin.setValue(
+                    int(getattr(cfg, "vlm_max_tokens", 2048) or 2048)
+                )
+                self.vlm_timeout_spin.setValue(
+                    float(getattr(cfg, "vlm_timeout_s", 30) or 30)
+                )
             self._set_combo(self.source_combo, cfg.source_lang)
             self._set_combo(self.target_combo, cfg.target_lang)
             self.hotkey_edit.setText(cfg.hotkey or "Ctrl+Shift+T")
@@ -1434,7 +1760,61 @@ class MainWindow(QMainWindow):
             else:
                 self.reasoning_chk.setChecked(False)
                 self.reasoning_combo.setEnabled(False)
-                self._set_combo(self.reasoning_combo, "none")
+
+            # VLM sampling (independent)
+            if hasattr(self, "vlm_temp_chk"):
+                _load_opt_float(
+                    self.vlm_temp_chk,
+                    self.vlm_temp_spin,
+                    getattr(cfg, "vlm_temperature", None),
+                    0.2,
+                )
+                _load_opt_float(
+                    self.vlm_topp_chk,
+                    self.vlm_topp_spin,
+                    getattr(cfg, "vlm_top_p", None),
+                    1.0,
+                )
+                vtopk = getattr(cfg, "vlm_top_k", None)
+                if vtopk is not None and int(vtopk) > 0:
+                    self.vlm_topk_chk.setChecked(True)
+                    self.vlm_topk_spin.setEnabled(True)
+                    self.vlm_topk_spin.setValue(int(vtopk))
+                else:
+                    self.vlm_topk_chk.setChecked(False)
+                    self.vlm_topk_spin.setEnabled(False)
+                    self.vlm_topk_spin.setValue(40)
+                _load_opt_float(
+                    self.vlm_fp_chk,
+                    self.vlm_fp_spin,
+                    getattr(cfg, "vlm_frequency_penalty", None),
+                    0.0,
+                )
+                _load_opt_float(
+                    self.vlm_pp_chk,
+                    self.vlm_pp_spin,
+                    getattr(cfg, "vlm_presence_penalty", None),
+                    0.0,
+                )
+                vseed = getattr(cfg, "vlm_seed", None)
+                if vseed is not None:
+                    self.vlm_seed_chk.setChecked(True)
+                    self.vlm_seed_spin.setEnabled(True)
+                    self.vlm_seed_spin.setValue(int(vseed))
+                else:
+                    self.vlm_seed_chk.setChecked(False)
+                    self.vlm_seed_spin.setEnabled(False)
+                    self.vlm_seed_spin.setValue(0)
+                veffort = (
+                    getattr(cfg, "vlm_reasoning_effort", "") or ""
+                ).strip().lower()
+                if veffort in ("none", "low", "medium", "high"):
+                    self.vlm_reasoning_chk.setChecked(True)
+                    self.vlm_reasoning_combo.setEnabled(True)
+                    self._set_combo(self.vlm_reasoning_combo, veffort)
+                else:
+                    self.vlm_reasoning_chk.setChecked(False)
+                    self.vlm_reasoning_combo.setEnabled(False)
 
             self.obs_enabled_check.setChecked(bool(getattr(cfg, "obs_enabled", False)))
             self.obs_port_spin.setValue(int(getattr(cfg, "obs_port", 8765) or 8765))
@@ -1498,6 +1878,51 @@ class MainWindow(QMainWindow):
         c.custom_prompt = self.prompt_edit.text().strip()
         c.context_history_size = int(self.context_spin.value())
         c.max_tokens = int(self.max_tokens_spin.value())
+        if hasattr(self, "timeout_spin"):
+            c.llm_timeout_s = float(self.timeout_spin.value())
+        # VLM endpoint (independent)
+        if hasattr(self, "vlm_provider_combo"):
+            vpid = self.vlm_provider_combo.currentData() or "xai"
+            c.vlm_api_provider = vpid
+            vpreset = get_preset(vpid)
+            c.vlm_api_protocol = (
+                vpreset.protocol if vpreset else (c.vlm_api_protocol or "openai")
+            )
+            c.vlm_api_key = self.vlm_api_key_edit.text().strip()
+            c.vlm_base_url = self.vlm_base_url_edit.text().strip() or (
+                vpreset.base_url if vpreset else "https://api.x.ai/v1"
+            )
+            c.vlm_model = self.model_text(role="vlm").strip() or c.vlm_model
+            c.vlm_custom_prompt = self.vlm_prompt_edit.text().strip()
+            c.vlm_max_tokens = int(self.vlm_max_tokens_spin.value())
+            c.vlm_timeout_s = float(self.vlm_timeout_spin.value())
+            c.vlm_temperature = _optional_float_row(
+                enabled=self.vlm_temp_chk.isChecked(), spin=self.vlm_temp_spin
+            )
+            c.vlm_top_p = _optional_float_row(
+                enabled=self.vlm_topp_chk.isChecked(), spin=self.vlm_topp_spin
+            )
+            c.vlm_top_k = (
+                int(self.vlm_topk_spin.value())
+                if self.vlm_topk_chk.isChecked()
+                and int(self.vlm_topk_spin.value()) > 0
+                else None
+            )
+            c.vlm_frequency_penalty = _optional_float_row(
+                enabled=self.vlm_fp_chk.isChecked(), spin=self.vlm_fp_spin
+            )
+            c.vlm_presence_penalty = _optional_float_row(
+                enabled=self.vlm_pp_chk.isChecked(), spin=self.vlm_pp_spin
+            )
+            c.vlm_seed = _optional_int_row(
+                enabled=self.vlm_seed_chk.isChecked(), spin=self.vlm_seed_spin
+            )
+            if self.vlm_reasoning_chk.isChecked():
+                c.vlm_reasoning_effort = str(
+                    self.vlm_reasoning_combo.currentData() or "none"
+                )
+            else:
+                c.vlm_reasoning_effort = ""
         c.source_lang = self.source_combo.currentData() or "ja"
         c.target_lang = self.target_combo.currentData() or "zh-Hant"
         c.hotkey = self.hotkey_edit.text().strip() or "Ctrl+Shift+T"
@@ -1615,13 +2040,59 @@ class MainWindow(QMainWindow):
         self._set_dirty(True)
 
     def _on_pipeline_mode_changed(self, *_args) -> None:
+        """Show only settings used by the selected pipeline mode."""
         mode = self.pipeline_mode_combo.currentData() or "ocr"
-        self.ocr_combo.setEnabled(mode != "vlm")
+        is_ocr = mode == "ocr"
+        is_vlm = mode == "vlm"
+        is_vlm_ocr = mode == "vlm_ocr"
+        use_vlm = is_vlm or is_vlm_ocr
+        use_translate = is_ocr or is_vlm_ocr
+
+        if hasattr(self, "local_ocr_panel"):
+            self.local_ocr_panel.setVisible(is_ocr)
+        if hasattr(self, "vlm_panel"):
+            self.vlm_panel.setVisible(use_vlm)
+        if hasattr(self, "llm_group"):
+            self.llm_group.setVisible(use_translate)
+
+        self.ocr_combo.setEnabled(is_ocr)
+
+        # Dynamic titles + hints
+        if hasattr(self, "recognize_group"):
+            if is_ocr:
+                self.recognize_group.setTitle(tr("group.recognize_local"))
+            elif is_vlm:
+                self.recognize_group.setTitle(tr("group.recognize_vlm_direct"))
+            else:
+                self.recognize_group.setTitle(tr("group.recognize_vlm"))
+
+        if hasattr(self, "recognize_hint"):
+            if is_ocr:
+                self.recognize_hint.setText(tr("hint.recognize_local_active"))
+            elif is_vlm:
+                self.recognize_hint.setText(tr("hint.recognize_vlm_direct"))
+            else:
+                self.recognize_hint.setText(tr("hint.recognize_vlm_active"))
+
+        if hasattr(self, "vlm_optional_hint") and use_vlm:
+            if is_vlm:
+                self.vlm_optional_hint.setText(tr("hint.vlm_direct"))
+            else:
+                self.vlm_optional_hint.setText(tr("hint.vlm_optional"))
+
+        if hasattr(self, "llm_optional_hint") and use_translate:
+            self.llm_optional_hint.setText(tr("hint.llm_optional"))
 
     def _on_provider_changed(self, _idx: int = 0) -> None:
         if self._loading_ui or self._applying_preset:
             return
         self._sync_api_meta_from_provider(apply_defaults=True)
+        self._mark_dirty()
+
+    def _on_vlm_provider_changed(self, _idx: int = 0) -> None:
+        if self._loading_ui or self._applying_preset:
+            return
+        self._sync_vlm_api_meta_from_provider(apply_defaults=True)
         self._mark_dirty()
 
     def _sync_api_meta_from_provider(self, *, apply_defaults: bool) -> None:
@@ -1653,24 +2124,62 @@ class MainWindow(QMainWindow):
             finally:
                 self._applying_preset = False
 
-    def model_text(self) -> str:
-        if self.model_combo.lineEdit() is not None:
-            return self.model_combo.lineEdit().text()
-        return self.model_combo.currentText()
+    def _sync_vlm_api_meta_from_provider(self, *, apply_defaults: bool) -> None:
+        if not hasattr(self, "vlm_provider_combo"):
+            return
+        pid = self.vlm_provider_combo.currentData() or "xai"
+        preset = get_preset(pid)
+        if not preset:
+            self.vlm_api_meta_label.setText("")
+            return
 
-    def set_model_text(self, model: str) -> None:
+        if preset.protocol == "openai":
+            style = "OpenAI Compatible · POST {base}/chat/completions"
+        else:
+            style = "Anthropic Compatible · POST {base}/v1/messages"
+
+        bits = [style]
+        if preset.hint:
+            bits.append(preset.hint)
+        self.vlm_api_meta_label.setText(" · ".join(bits))
+
+        if apply_defaults:
+            self._applying_preset = True
+            try:
+                self.vlm_base_url_edit.setText(preset.base_url)
+                if preset.model:
+                    self.set_model_text(preset.model, role="vlm")
+            finally:
+                self._applying_preset = False
+
+    def model_text(self, role: str = "translate") -> str:
+        combo = (
+            self.vlm_model_combo
+            if role == "vlm" and hasattr(self, "vlm_model_combo")
+            else self.model_combo
+        )
+        if combo.lineEdit() is not None:
+            return combo.lineEdit().text()
+        return combo.currentText()
+
+    def set_model_text(self, model: str, *, role: str = "translate") -> None:
         model = model or ""
-        self.model_combo.blockSignals(True)
+        combo = (
+            self.vlm_model_combo
+            if role == "vlm" and hasattr(self, "vlm_model_combo")
+            else self.model_combo
+        )
+        combo.blockSignals(True)
         try:
-            idx = self.model_combo.findText(model, Qt.MatchFlag.MatchExactly)
+            idx = combo.findText(model, Qt.MatchFlag.MatchExactly)
             if idx >= 0:
-                self.model_combo.setCurrentIndex(idx)
-            elif self.model_combo.lineEdit() is not None:
-                self.model_combo.lineEdit().setText(model)
+                combo.setCurrentIndex(idx)
+            elif combo.lineEdit() is not None:
+                combo.lineEdit().setText(model)
             else:
-                self.model_combo.setCurrentText(model)
+                combo.setCurrentText(model)
         finally:
-            self.model_combo.blockSignals(False)
+            combo.blockSignals(False)
 
     def _on_model_combo_changed(self, _idx: int = 0) -> None:
         if self._loading_ui or self._applying_preset:
@@ -1680,35 +2189,67 @@ class MainWindow(QMainWindow):
             self.model_combo.lineEdit().setText(str(self.model_combo.currentData()))
         self._mark_dirty()
 
-    def set_models_list(self, models: list[str], *, keep_current: bool = True) -> None:
+    def _on_vlm_model_combo_changed(self, _idx: int = 0) -> None:
+        if self._loading_ui or self._applying_preset:
+            return
+        if (
+            hasattr(self, "vlm_model_combo")
+            and self.vlm_model_combo.lineEdit() is not None
+            and self.vlm_model_combo.currentData()
+        ):
+            self.vlm_model_combo.lineEdit().setText(
+                str(self.vlm_model_combo.currentData())
+            )
+        self._mark_dirty()
+
+    def set_models_list(
+        self, models: list[str], *, keep_current: bool = True, role: str = "translate"
+    ) -> None:
         """Populate model dropdown; keep current typed model if present."""
-        current = self.model_text().strip() if keep_current else ""
-        self._model_ids = list(models or [])
-        self.model_combo.blockSignals(True)
+        combo = (
+            self.vlm_model_combo
+            if role == "vlm" and hasattr(self, "vlm_model_combo")
+            else self.model_combo
+        )
+        current = self.model_text(role=role).strip() if keep_current else ""
+        ids = list(models or [])
+        if role == "vlm":
+            self._vlm_model_ids = ids
+        else:
+            self._model_ids = ids
+        combo.blockSignals(True)
         try:
-            self.model_combo.clear()
-            for mid in self._model_ids:
-                self.model_combo.addItem(mid, mid)
+            combo.clear()
+            for mid in ids:
+                combo.addItem(mid, mid)
             if current:
-                idx = self.model_combo.findText(current, Qt.MatchFlag.MatchExactly)
+                idx = combo.findText(current, Qt.MatchFlag.MatchExactly)
                 if idx >= 0:
-                    self.model_combo.setCurrentIndex(idx)
-                elif self.model_combo.lineEdit() is not None:
-                    self.model_combo.lineEdit().setText(current)
+                    combo.setCurrentIndex(idx)
+                elif combo.lineEdit() is not None:
+                    combo.lineEdit().setText(current)
                 else:
-                    self.model_combo.setEditText(current)
-            elif self._model_ids:
-                self.model_combo.setCurrentIndex(0)
+                    combo.setEditText(current)
+            elif ids:
+                combo.setCurrentIndex(0)
         finally:
-            self.model_combo.blockSignals(False)
+            combo.blockSignals(False)
 
-    def set_models_status(self, msg: str) -> None:
-        self.models_status_label.setText(msg or "")
+    def set_models_status(self, msg: str, *, role: str = "translate") -> None:
+        if role == "vlm" and hasattr(self, "vlm_models_status_label"):
+            self.vlm_models_status_label.setText(msg or "")
+        else:
+            self.models_status_label.setText(msg or "")
 
-    def set_models_refreshing(self, busy: bool) -> None:
-        self.btn_refresh_models.setEnabled(not busy)
-        if busy:
-            self.models_status_label.setText(tr("models.loading"))
+    def set_models_refreshing(self, busy: bool, *, role: str = "translate") -> None:
+        if role == "vlm" and hasattr(self, "btn_vlm_refresh_models"):
+            self.btn_vlm_refresh_models.setEnabled(not busy)
+            if busy:
+                self.vlm_models_status_label.setText(tr("models.loading"))
+        else:
+            self.btn_refresh_models.setEnabled(not busy)
+            if busy:
+                self.models_status_label.setText(tr("models.loading"))
 
     def set_windows(self, windows: list[WindowInfo]) -> None:
         self._windows = windows

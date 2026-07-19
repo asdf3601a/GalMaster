@@ -6,10 +6,13 @@ Capture is owned by AppController / CaptureStage; jobs must include a pre-grabbe
 from __future__ import annotations
 
 from collections import deque
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout
 from copy import deepcopy
 from dataclasses import dataclass
 from hashlib import sha1
 import io
+import time
+from typing import Callable, TypeVar
 
 from PIL import Image
 from PySide6.QtCore import QObject, Qt, QThread, Signal
@@ -19,7 +22,7 @@ from app.capture.screenshot import (
     is_mostly_blank,
     make_preview_image,
 )
-from app.config import AppConfig
+from app.config import AppConfig, LlmEndpointConfig
 from app.i18n import tr
 from app.ocr.base import OCREngine, create_ocr_engine
 from app.pipeline_queue import buffer_cap, enqueue_job
@@ -28,6 +31,12 @@ from app.translate.llm_translator import (
     LLMTranslator,
     sampling_fingerprint,
 )
+
+T = TypeVar("T")
+
+# Circuit breaker: separate counters per endpoint role
+_CB_FAIL_THRESHOLD = 3
+_CB_COOLDOWN_S = 30.0
 
 
 @dataclass
@@ -49,6 +58,34 @@ class PipelineJob:
     force: bool = False  # manual/hotkey: always run even if text unchanged
 
 
+class _CircuitBreaker:
+    """Per-endpoint consecutive-failure cooldown (auto-monitor friendly)."""
+
+    def __init__(self) -> None:
+        self._fails: dict[str, int] = {}
+        self._open_until: dict[str, float] = {}
+
+    def allow(self, role: str, *, force: bool) -> bool:
+        if force:
+            return True
+        until = self._open_until.get(role, 0.0)
+        return time.monotonic() >= until
+
+    def record_success(self, role: str) -> None:
+        self._fails[role] = 0
+        self._open_until.pop(role, None)
+
+    def record_failure(self, role: str) -> None:
+        n = self._fails.get(role, 0) + 1
+        self._fails[role] = n
+        if n >= _CB_FAIL_THRESHOLD:
+            self._open_until[role] = time.monotonic() + _CB_COOLDOWN_S
+
+    def cooldown_remaining(self, role: str) -> float:
+        until = self._open_until.get(role, 0.0)
+        return max(0.0, until - time.monotonic())
+
+
 class _Worker(QObject):
     finished = Signal(object)  # PipelineResult
     progress = Signal(str)
@@ -64,9 +101,14 @@ class _Worker(QObject):
         # Sliding window of (source, translation) for LLM context
         self._history: deque[tuple[str, str]] = deque(maxlen=32)
         self._abort = False
+        self._generation = 0
+        self._breaker = _CircuitBreaker()
+        # One pool for deadline-wrapped LLM calls (orphan threads die with process)
+        self._llm_pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="llm-call")
 
     def request_abort(self) -> None:
         self._abort = True
+        self._generation += 1
 
     def clear_abort(self) -> None:
         self._abort = False
@@ -93,6 +135,7 @@ class _Worker(QObject):
             )
             return
         self.clear_abort()
+        gen = self._generation
 
         try:
             if img is None:
@@ -102,7 +145,7 @@ class _Worker(QObject):
                 )
                 return
 
-            if self._abort:
+            if self._abort or gen != self._generation:
                 self.finished.emit(
                     PipelineResult(
                         "", "", skipped=True, status_message=tr("pipe.cancelled")
@@ -132,20 +175,66 @@ class _Worker(QObject):
 
             mode = (getattr(cfg, "pipeline_mode", "ocr") or "ocr").strip().lower()
             if mode == "vlm":
-                self._run_vlm(cfg, img, force=force)
+                self._run_vlm(cfg, img, force=force, gen=gen)
+            elif mode == "vlm_ocr":
+                self._run_vlm_ocr(cfg, img, force=force, gen=gen)
             else:
-                self._run_ocr(cfg, img, force=force)
+                self._run_ocr(cfg, img, force=force, gen=gen)
         except Exception as exc:
             self.finished.emit(
                 PipelineResult("", "", error=tr("pipe.error", err=str(exc)))
             )
 
-    def _run_ocr(self, cfg: AppConfig, img: Image.Image, *, force: bool) -> None:
+    def _run_with_deadline(
+        self,
+        fn: Callable[[], T],
+        *,
+        timeout_s: float,
+        gen: int,
+    ) -> T:
+        """Run fn in a pool thread; raise RuntimeError on wall-clock timeout or abort."""
+        # Margin so HTTP timeout can fire first when it works
+        wall = max(6.0, float(timeout_s) + 5.0)
+        future = self._llm_pool.submit(fn)
+        try:
+            result = future.result(timeout=wall)
+        except FuturesTimeout as exc:
+            future.cancel()
+            raise RuntimeError(f"連線逾時（{timeout_s:.0f}s）") from exc
+        if self._abort or gen != self._generation:
+            raise RuntimeError(tr("pipe.cancelled"))
+        return result
+
+    def _call_llm(
+        self,
+        role: str,
+        fn: Callable[[], T],
+        *,
+        timeout_s: float,
+        force: bool,
+        gen: int,
+    ) -> T:
+        if not self._breaker.allow(role, force=force):
+            rem = int(self._breaker.cooldown_remaining(role))
+            raise RuntimeError(tr("pipe.llm_cooldown", n=rem or 1))
+        try:
+            out = self._run_with_deadline(fn, timeout_s=timeout_s, gen=gen)
+            self._breaker.record_success(role)
+            return out
+        except Exception:
+            # Do not open the breaker for user cancel / generation invalidate
+            if not (self._abort or gen != self._generation):
+                self._breaker.record_failure(role)
+            raise
+
+    def _run_ocr(
+        self, cfg: AppConfig, img: Image.Image, *, force: bool, gen: int
+    ) -> None:
         ocr = self._get_ocr(cfg.ocr_engine, getattr(cfg, "source_lang", "ja") or "ja")
         backend = getattr(ocr, "backend_label", None) or cfg.ocr_engine
         self.progress.emit(tr("pipe.ocr_running", backend=backend))
         source = ocr.recognize(img).strip()
-        if self._abort:
+        if self._abort or gen != self._generation:
             self.finished.emit(
                 PipelineResult(
                     "", "", skipped=True, status_message=tr("pipe.cancelled")
@@ -181,19 +270,20 @@ class _Worker(QObject):
 
         hist_n = max(0, int(getattr(cfg, "context_history_size", 3) or 0))
         history = list(self._history)[-hist_n:] if hist_n > 0 else []
+        tr_ep = cfg.translate_endpoint()
 
-        if not cfg.has_llm:
+        if not tr_ep.has_key:
             self.progress.emit(tr("pipe.ocr_done_no_llm"))
             self._push_history(source, "")
             self.finished.emit(PipelineResult(source, "", ocr_only=True))
             return
 
-        samp = self._sampling_fp(cfg)
+        samp = self._endpoint_sampling_fp(tr_ep)
         cache_key = self._make_cache_key(
             f"ocr|{source}",
             cfg.source_lang,
             cfg.target_lang,
-            cfg.model,
+            tr_ep.model,
             history,
             samp,
         )
@@ -204,7 +294,7 @@ class _Worker(QObject):
             self.finished.emit(PipelineResult(source, cached, from_cache=True))
             return
 
-        if self._abort:
+        if self._abort or gen != self._generation:
             self.finished.emit(
                 PipelineResult(
                     "", "", skipped=True, status_message=tr("pipe.cancelled")
@@ -218,12 +308,18 @@ class _Worker(QObject):
             else tr("pipe.llm")
         )
         try:
-            translator = self._make_translator(cfg)
-            translated = translator.translate(
-                source,
-                cfg.source_lang,
-                cfg.target_lang,
-                history=history,
+            translator = self._make_translator(tr_ep)
+            translated = self._call_llm(
+                "translate",
+                lambda: translator.translate(
+                    source,
+                    cfg.source_lang,
+                    cfg.target_lang,
+                    history=history,
+                ),
+                timeout_s=tr_ep.timeout_s,
+                force=force,
+                gen=gen,
             )
         except Exception as exc:
             # Soft error: keep OCR text so UI/OBS stay usable; never hang on API faults.
@@ -240,8 +336,11 @@ class _Worker(QObject):
         self.progress.emit(tr("pipe.translate_done"))
         self.finished.emit(PipelineResult(source, translated, from_cache=False))
 
-    def _run_vlm(self, cfg: AppConfig, img: Image.Image, *, force: bool) -> None:
-        if not cfg.has_llm:
+    def _run_vlm(
+        self, cfg: AppConfig, img: Image.Image, *, force: bool, gen: int
+    ) -> None:
+        vlm_ep = cfg.vlm_endpoint()
+        if not vlm_ep.has_key:
             self.finished.emit(
                 PipelineResult("", "", error=tr("pipe.vlm_need_key"))
             )
@@ -261,12 +360,12 @@ class _Worker(QObject):
 
         hist_n = max(0, int(getattr(cfg, "context_history_size", 3) or 0))
         history = list(self._history)[-hist_n:] if hist_n > 0 else []
-        samp = self._sampling_fp(cfg)
+        samp = self._endpoint_sampling_fp(vlm_ep)
         cache_key = self._make_cache_key(
             f"vlm|{img_fp}",
             cfg.source_lang,
             cfg.target_lang,
-            cfg.model,
+            vlm_ep.model,
             history,
             samp,
         )
@@ -283,7 +382,7 @@ class _Worker(QObject):
             self.finished.emit(PipelineResult(src_c, tr_c, from_cache=True))
             return
 
-        if self._abort:
+        if self._abort or gen != self._generation:
             self.finished.emit(
                 PipelineResult(
                     "", "", skipped=True, status_message=tr("pipe.cancelled")
@@ -297,12 +396,18 @@ class _Worker(QObject):
             else tr("pipe.vlm")
         )
         try:
-            translator = self._make_translator(cfg)
-            source, translated = translator.translate_image(
-                img,
-                cfg.source_lang,
-                cfg.target_lang,
-                history=history,
+            translator = self._make_translator(vlm_ep)
+            source, translated = self._call_llm(
+                "vlm",
+                lambda: translator.translate_image(
+                    img,
+                    cfg.source_lang,
+                    cfg.target_lang,
+                    history=history,
+                ),
+                timeout_s=vlm_ep.timeout_s,
+                force=force,
+                gen=gen,
             )
         except Exception as exc:
             # Mark frame seen so auto-monitor does not immediately re-spam the same image.
@@ -331,36 +436,171 @@ class _Worker(QObject):
         self.progress.emit(tr("pipe.translate_done"))
         self.finished.emit(PipelineResult(source, translated, from_cache=False))
 
-    @staticmethod
-    def _make_translator(cfg: AppConfig) -> LLMTranslator:
-        return LLMTranslator(
-            api_key=cfg.api_key,
-            base_url=cfg.base_url,
-            model=cfg.model,
-            custom_prompt=cfg.custom_prompt,
-            protocol=getattr(cfg, "api_protocol", "openai") or "openai",
-            anthropic_version=getattr(cfg, "anthropic_version", "2023-06-01"),
-            max_tokens=int(getattr(cfg, "max_tokens", 2048) or 2048),
-            temperature=getattr(cfg, "temperature", None),
-            top_p=getattr(cfg, "top_p", None),
-            top_k=getattr(cfg, "top_k", None),
-            frequency_penalty=getattr(cfg, "frequency_penalty", None),
-            presence_penalty=getattr(cfg, "presence_penalty", None),
-            reasoning_effort=getattr(cfg, "reasoning_effort", "") or "",
-            seed=getattr(cfg, "seed", None),
+    def _run_vlm_ocr(
+        self, cfg: AppConfig, img: Image.Image, *, force: bool, gen: int
+    ) -> None:
+        """VLM recognize (vision endpoint) → optional text translate (translate endpoint)."""
+        vlm_ep = cfg.vlm_endpoint()
+        tr_ep = cfg.translate_endpoint()
+        if not vlm_ep.has_key:
+            self.finished.emit(
+                PipelineResult("", "", error=tr("pipe.vlm_ocr_need_key"))
+            )
+            return
+
+        img_fp = self._image_fingerprint(img)
+        if not force and img_fp and img_fp == self._last_image_fp:
+            self.finished.emit(
+                PipelineResult(
+                    "",
+                    "",
+                    skipped=True,
+                    status_message=tr("pipe.vlm_unchanged"),
+                )
+            )
+            return
+
+        if self._abort or gen != self._generation:
+            self.finished.emit(
+                PipelineResult(
+                    "", "", skipped=True, status_message=tr("pipe.cancelled")
+                )
+            )
+            return
+
+        self.progress.emit(tr("pipe.vlm_ocr"))
+        try:
+            vlm = self._make_translator(vlm_ep)
+            source = self._call_llm(
+                "vlm",
+                lambda: vlm.recognize_image(
+                    img, getattr(cfg, "source_lang", "ja") or "ja"
+                ),
+                timeout_s=vlm_ep.timeout_s,
+                force=force,
+                gen=gen,
+            )
+            source = (source or "").strip()
+        except Exception as exc:
+            self._last_image_fp = img_fp
+            self.finished.emit(
+                PipelineResult(
+                    "",
+                    "",
+                    error=tr("pipe.llm_error", err=str(exc)[:500]),
+                )
+            )
+            return
+
+        if self._abort or gen != self._generation:
+            self.finished.emit(
+                PipelineResult(
+                    "", "", skipped=True, status_message=tr("pipe.cancelled")
+                )
+            )
+            return
+
+        if not source:
+            self._last_image_fp = img_fp
+            self.finished.emit(
+                PipelineResult(
+                    "",
+                    "",
+                    skipped=True,
+                    status_message=tr(
+                        "pipe.ocr_empty", info=describe_image(img)
+                    ),
+                )
+            )
+            return
+
+        if not force and source == self._last_source:
+            self._last_image_fp = img_fp
+            self.finished.emit(
+                PipelineResult(
+                    source,
+                    "",
+                    skipped=True,
+                    status_message=tr("pipe.unchanged"),
+                )
+            )
+            return
+        self._last_source = source
+        self._last_image_fp = img_fp
+
+        hist_n = max(0, int(getattr(cfg, "context_history_size", 3) or 0))
+        history = list(self._history)[-hist_n:] if hist_n > 0 else []
+
+        if not tr_ep.has_key:
+            self.progress.emit(tr("pipe.ocr_done_no_llm"))
+            self._push_history(source, "")
+            self.finished.emit(PipelineResult(source, "", ocr_only=True))
+            return
+
+        samp = self._endpoint_sampling_fp(tr_ep)
+        cache_key = self._make_cache_key(
+            f"vlm_ocr|{source}",
+            cfg.source_lang,
+            cfg.target_lang,
+            tr_ep.model,
+            history,
+            samp,
         )
+        cached = self._cache.get(cache_key)
+        if cached is not None:
+            self.progress.emit(tr("pipe.cache"))
+            self._push_history(source, cached)
+            self.finished.emit(PipelineResult(source, cached, from_cache=True))
+            return
+
+        self.progress.emit(
+            tr("pipe.llm_ctx", n=len(history), total=hist_n)
+            if hist_n
+            else tr("pipe.llm")
+        )
+        try:
+            translator = self._make_translator(tr_ep)
+            translated = self._call_llm(
+                "translate",
+                lambda: translator.translate(
+                    source,
+                    cfg.source_lang,
+                    cfg.target_lang,
+                    history=history,
+                ),
+                timeout_s=tr_ep.timeout_s,
+                force=force,
+                gen=gen,
+            )
+        except Exception as exc:
+            self.finished.emit(
+                PipelineResult(
+                    source,
+                    "",
+                    error=tr("pipe.llm_error", err=str(exc)[:500]),
+                )
+            )
+            return
+        self._cache.put(cache_key, translated)
+        self._push_history(source, translated)
+        self.progress.emit(tr("pipe.translate_done"))
+        self.finished.emit(PipelineResult(source, translated, from_cache=False))
 
     @staticmethod
-    def _sampling_fp(cfg: AppConfig) -> str:
+    def _make_translator(ep: LlmEndpointConfig) -> LLMTranslator:
+        return LLMTranslator.from_endpoint(ep)
+
+    @staticmethod
+    def _endpoint_sampling_fp(ep: LlmEndpointConfig) -> str:
         return sampling_fingerprint(
-            temperature=getattr(cfg, "temperature", None),
-            top_p=getattr(cfg, "top_p", None),
-            top_k=getattr(cfg, "top_k", None),
-            frequency_penalty=getattr(cfg, "frequency_penalty", None),
-            presence_penalty=getattr(cfg, "presence_penalty", None),
-            reasoning_effort=getattr(cfg, "reasoning_effort", "") or "",
-            seed=getattr(cfg, "seed", None),
-            max_tokens=int(getattr(cfg, "max_tokens", 2048) or 2048),
+            temperature=ep.temperature,
+            top_p=ep.top_p,
+            top_k=ep.top_k,
+            frequency_penalty=ep.frequency_penalty,
+            presence_penalty=ep.presence_penalty,
+            reasoning_effort=ep.reasoning_effort or "",
+            seed=ep.seed,
+            max_tokens=int(ep.max_tokens or 2048),
         )
 
     @staticmethod
@@ -517,8 +757,11 @@ class TranslationPipeline(QObject):
     def shutdown(self) -> None:
         self._queue.clear()
         self._cmd_abort.emit()
-        # Allow the worker thread event loop to process abort + finish current slot
+        # Do not block the UI thread for long — abandon residual LLM work.
         self._thread.quit()
-        if not self._thread.wait(10000):
-            # Last resort: leave thread; process is exiting
+        if not self._thread.wait(1000):
+            pass
+        try:
+            self._worker._llm_pool.shutdown(wait=False, cancel_futures=True)
+        except Exception:
             pass

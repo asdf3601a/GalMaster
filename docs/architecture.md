@@ -15,7 +15,7 @@ app/
   session/
     capture_stage.py      # Explicit Capture-stage state (Idle / Capturing)
   config.py               # AppConfig load/save (project-root config.json)
-  pipeline.py             # Process stage: OCR|VLM → LLM on QThread
+  pipeline.py             # Process stage: OCR | VLM | VLM-OCR→Translate on QThread
   pipeline_queue.py       # Bounded FIFO for Process waiting jobs
   capture/                # Detect + grab (monitor, screenshot, WGC, DPI, windows)
   ocr/                    # OneOCR / Manga / Rapid / Paddle

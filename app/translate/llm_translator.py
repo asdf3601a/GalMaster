@@ -56,6 +56,58 @@ def build_vlm_system_prompt(custom_prompt: str = "") -> str:
     return system
 
 
+def build_vlm_ocr_system_prompt(custom_prompt: str = "") -> str:
+    system = (
+        "You are an OCR engine for Japanese visual novels / galgames. "
+        "Read dialogue and UI text from the provided screenshot accurately. "
+        "Preserve character names, honorifics, and line breaks when meaningful. "
+        "Output ONLY the recognized source text — no translation, no labels, "
+        "no markdown fences, no explanations. "
+        "If the image has no readable text, output an empty response."
+    )
+    custom = (custom_prompt or "").strip()
+    if custom:
+        system = f"{system}\n\nAdditional instructions:\n{custom}"
+    return system
+
+
+def build_vlm_ocr_user_prompt(source_lang: str) -> str:
+    src = _lang_label(source_lang)
+    if source_lang == "auto":
+        return (
+            "Transcribe all readable game dialogue and UI text in this screenshot. "
+            "Output only the source text."
+        )
+    return (
+        f"Transcribe all readable game dialogue and UI text in this screenshot "
+        f"(expected language: {src}). Output only the source text."
+    )
+
+
+def strip_ocr_response(raw: str) -> str:
+    """Normalize VLM-OCR model output to plain source text."""
+    text = (raw or "").strip()
+    if not text:
+        return ""
+    # Drop common markdown fences
+    if text.startswith("```"):
+        lines = text.splitlines()
+        if lines and lines[0].startswith("```"):
+            lines = lines[1:]
+        if lines and lines[-1].strip() == "```":
+            lines = lines[:-1]
+        text = "\n".join(lines).strip()
+    # If model ignored instructions and used SOURCE: label
+    src_m = re.search(
+        r"(?is)^\s*SOURCE\s*:\s*(.*?)\s*(?=^TRANSLATION\s*:|\Z)",
+        text,
+        re.MULTILINE,
+    )
+    if src_m:
+        return src_m.group(1).strip()
+    return text
+
+
 def build_user_prompt(text: str, source_lang: str, target_lang: str) -> str:
     src = _lang_label(source_lang)
     tgt = _lang_label(target_lang)
@@ -264,9 +316,11 @@ def _normalize_anthropic_base(base_url: str) -> str:
 
 
 # Chat/completions: fail fast enough that the UI does not look frozen.
-DEFAULT_LLM_TIMEOUT_S = 60.0
+DEFAULT_LLM_TIMEOUT_S = 30.0
 # Model list is usually quick; keep a shorter bound.
 DEFAULT_MODELS_TIMEOUT_S = 30.0
+# Hard wall-clock across paginated GET /models.
+DEFAULT_MODELS_TOTAL_BUDGET_S = 45.0
 
 
 def _http_json(
@@ -303,6 +357,24 @@ def _http_json(
         return json.loads(raw)
     except json.JSONDecodeError as exc:
         raise RuntimeError(f"API 回傳非 JSON：{raw[:200]}") from exc
+
+
+def map_llm_exception(exc: BaseException, *, timeout_s: float) -> RuntimeError:
+    """Normalize SDK / transport errors into short RuntimeError messages."""
+    if isinstance(exc, RuntimeError):
+        return exc
+    name = type(exc).__name__
+    msg = str(exc) or name
+    low = msg.lower()
+    if "timeout" in name.lower() or "timed out" in low or "timeout" in low:
+        return RuntimeError(f"連線逾時（{timeout_s:.0f}s）")
+    # openai.APIStatusError often has .status_code
+    code = getattr(exc, "status_code", None)
+    if code is not None:
+        return RuntimeError(f"HTTP {code}: {msg[:500]}")
+    if "connection" in low or "connect" in low:
+        return RuntimeError(f"連線失敗: {msg[:300]}")
+    return RuntimeError(msg[:500])
 
 
 def _extract_model_ids(payload: Any) -> list[str]:
@@ -346,7 +418,8 @@ def list_models(
     base_url: str,
     protocol: str = "openai",
     anthropic_version: str = "2023-06-01",
-    timeout: float = 30.0,
+    timeout: float = DEFAULT_MODELS_TIMEOUT_S,
+    total_budget_s: float = DEFAULT_MODELS_TOTAL_BUDGET_S,
 ) -> list[str]:
     """
     GET available model ids when the provider exposes a models list endpoint.
@@ -356,6 +429,8 @@ def list_models(
 
     Raises RuntimeError/ValueError on failure (no key, HTTP error, empty parse).
     """
+    import time
+
     key = (api_key or "").strip()
     if not key:
         raise ValueError("尚未設定 API Key")
@@ -382,9 +457,16 @@ def list_models(
     seen: set[str] = set()
     next_url: str | None = url
     pages = 0
+    started = time.monotonic()
+    budget = max(float(timeout), float(total_budget_s))
     while next_url and pages < 20:
+        if time.monotonic() - started > budget:
+            break
         pages += 1
-        data = _http_json("GET", next_url, headers=headers, body=None, timeout=timeout)
+        page_timeout = min(float(timeout), max(5.0, budget - (time.monotonic() - started)))
+        data = _http_json(
+            "GET", next_url, headers=headers, body=None, timeout=page_timeout
+        )
         for mid in _extract_model_ids(data):
             if mid not in seen:
                 seen.add(mid)
@@ -425,6 +507,7 @@ class LLMTranslator:
         presence_penalty: float | None = None,
         reasoning_effort: str = "",
         seed: int | None = None,
+        timeout_s: float = DEFAULT_LLM_TIMEOUT_S,
     ) -> None:
         if not (api_key or "").strip():
             raise ValueError("尚未設定 API Key")
@@ -442,8 +525,34 @@ class LLMTranslator:
         self.presence_penalty = presence_penalty
         self.reasoning_effort = reasoning_effort or ""
         self.seed = seed
+        try:
+            self.timeout_s = max(5.0, min(120.0, float(timeout_s)))
+        except (TypeError, ValueError):
+            self.timeout_s = DEFAULT_LLM_TIMEOUT_S
         if self.protocol not in ("openai", "anthropic"):
             raise ValueError(f"不支援的 API 協議: {protocol}（請用 openai 或 anthropic）")
+
+    @classmethod
+    def from_endpoint(cls, ep: Any) -> LLMTranslator:
+        """Build from AppConfig LlmEndpointConfig or any object with the same attrs."""
+        return cls(
+            api_key=getattr(ep, "api_key", "") or "",
+            base_url=getattr(ep, "base_url", "") or "https://api.x.ai/v1",
+            model=getattr(ep, "model", "") or "grok-4-1-fast-non-reasoning",
+            custom_prompt=getattr(ep, "custom_prompt", "") or "",
+            protocol=getattr(ep, "api_protocol", "openai") or "openai",
+            anthropic_version=getattr(ep, "anthropic_version", "2023-06-01")
+            or "2023-06-01",
+            max_tokens=int(getattr(ep, "max_tokens", 2048) or 2048),
+            temperature=getattr(ep, "temperature", None),
+            top_p=getattr(ep, "top_p", None),
+            top_k=getattr(ep, "top_k", None),
+            frequency_penalty=getattr(ep, "frequency_penalty", None),
+            presence_penalty=getattr(ep, "presence_penalty", None),
+            reasoning_effort=getattr(ep, "reasoning_effort", "") or "",
+            seed=getattr(ep, "seed", None),
+            timeout_s=float(getattr(ep, "timeout_s", DEFAULT_LLM_TIMEOUT_S) or DEFAULT_LLM_TIMEOUT_S),
+        )
 
     def _sampling(self) -> dict[str, Any]:
         return build_sampling_payload(
@@ -456,6 +565,12 @@ class LLMTranslator:
             seed=self.seed,
             protocol=self.protocol,
         )
+
+    def _wrap_call(self, fn: Any) -> Any:
+        try:
+            return fn()
+        except Exception as exc:
+            raise map_llm_exception(exc, timeout_s=self.timeout_s) from exc
 
     def translate(
         self,
@@ -480,9 +595,12 @@ class LLMTranslator:
             text, source_lang, target_lang, history=history or []
         )
 
-        if self.protocol == "anthropic":
-            return self._translate_anthropic(system, messages)
-        return self._translate_openai(system, messages)
+        def _do() -> str:
+            if self.protocol == "anthropic":
+                return self._translate_anthropic(system, messages)
+            return self._translate_openai(system, messages)
+
+        return self._wrap_call(_do)
 
     def translate_image(
         self,
@@ -503,11 +621,42 @@ class LLMTranslator:
         # Text history as prior SOURCE/TRANSLATION turns, then current image message
         history_msgs = build_vlm_history_messages(history or [])
 
-        if self.protocol == "anthropic":
-            raw = self._vlm_anthropic(system, history_msgs, user_text, b64, media_type)
-        else:
-            raw = self._vlm_openai(system, history_msgs, user_text, b64, media_type)
+        def _do() -> str:
+            if self.protocol == "anthropic":
+                return self._vlm_anthropic(
+                    system, history_msgs, user_text, b64, media_type
+                )
+            return self._vlm_openai(system, history_msgs, user_text, b64, media_type)
+
+        raw = self._wrap_call(_do)
         return parse_vlm_response(raw)
+
+    def recognize_image(self, img: Image.Image, source_lang: str) -> str:
+        """
+        VLM OCR only: image → source text (no translation).
+        Uses vision models; returns plain recognized text.
+        """
+        system = build_vlm_ocr_system_prompt(self.custom_prompt)
+        b64, media_type = image_to_jpeg_b64(img)
+        user_text = build_vlm_ocr_user_prompt(source_lang)
+
+        def _do() -> str:
+            if self.protocol == "anthropic":
+                return self._vlm_anthropic(system, [], user_text, b64, media_type)
+            return self._vlm_openai(system, [], user_text, b64, media_type)
+
+        raw = self._wrap_call(_do)
+        return strip_ocr_response(raw)
+
+    def _openai_client(self) -> Any:
+        from openai import OpenAI
+
+        return OpenAI(
+            api_key=self.api_key,
+            base_url=_normalize_openai_base(self.base_url),
+            timeout=self.timeout_s,
+            max_retries=0,
+        )
 
     def _translate_openai(self, system: str, messages: list[dict[str, str]]) -> str:
         full_messages: list[dict[str, Any]] = [
@@ -518,14 +667,7 @@ class LLMTranslator:
         # Prefer official SDK when available; pin timeout/retries so faults
         # cannot leave the pipeline (and UI busy flag) blocked for minutes.
         try:
-            from openai import OpenAI
-
-            client = OpenAI(
-                api_key=self.api_key,
-                base_url=_normalize_openai_base(self.base_url),
-                timeout=DEFAULT_LLM_TIMEOUT_S,
-                max_retries=1,
-            )
+            client = self._openai_client()
             resp = client.chat.completions.create(
                 model=self.model,
                 messages=full_messages,
@@ -551,7 +693,7 @@ class LLMTranslator:
             "Content-Type": "application/json",
         }
         data = _http_json(
-            "POST", url, headers=headers, body=payload, timeout=DEFAULT_LLM_TIMEOUT_S
+            "POST", url, headers=headers, body=payload, timeout=self.timeout_s
         )
         choices = data.get("choices") or []
         if not choices:
@@ -579,14 +721,7 @@ class LLMTranslator:
         ]
         sampling = self._sampling()
         try:
-            from openai import OpenAI
-
-            client = OpenAI(
-                api_key=self.api_key,
-                base_url=_normalize_openai_base(self.base_url),
-                timeout=DEFAULT_LLM_TIMEOUT_S,
-                max_retries=1,
-            )
+            client = self._openai_client()
             resp = client.chat.completions.create(
                 model=self.model,
                 messages=full_messages,
@@ -611,7 +746,7 @@ class LLMTranslator:
             "Content-Type": "application/json",
         }
         data = _http_json(
-            "POST", url, headers=headers, body=payload, timeout=DEFAULT_LLM_TIMEOUT_S
+            "POST", url, headers=headers, body=payload, timeout=self.timeout_s
         )
         choices = data.get("choices") or []
         if not choices:
@@ -638,7 +773,7 @@ class LLMTranslator:
         }
 
         data = _http_json(
-            "POST", url, headers=headers, body=payload, timeout=DEFAULT_LLM_TIMEOUT_S
+            "POST", url, headers=headers, body=payload, timeout=self.timeout_s
         )
         return self._parse_anthropic_content(data)
 
@@ -679,7 +814,7 @@ class LLMTranslator:
             "Authorization": f"Bearer {self.api_key}",
         }
         data = _http_json(
-            "POST", url, headers=headers, body=payload, timeout=DEFAULT_LLM_TIMEOUT_S
+            "POST", url, headers=headers, body=payload, timeout=self.timeout_s
         )
         return self._parse_anthropic_content(data)
 

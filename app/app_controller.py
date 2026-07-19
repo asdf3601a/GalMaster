@@ -649,26 +649,39 @@ class AppController(QObject):
         QGuiApplication.clipboard().setText(url)
         self.main.set_status(tr("obs.copied"), busy=False)
 
-    def refresh_models(self) -> None:
+    def refresh_models(self, role: str = "translate") -> None:
         """Fetch GET /models using current form API settings (background thread)."""
         if self._models_fetching:
             return
+        role = (role or "translate").strip().lower()
+        if role not in ("translate", "vlm"):
+            role = "translate"
         draft = self.main.collect_config()
-        if not (draft.api_key or "").strip():
-            self.main.set_models_status(tr("models.need_key"))
+        if role == "vlm":
+            api_key = (getattr(draft, "vlm_api_key", "") or "").strip()
+            base_url = (getattr(draft, "vlm_base_url", "") or "").strip()
+            protocol = getattr(draft, "vlm_api_protocol", "openai") or "openai"
+            anthropic_version = (
+                getattr(draft, "vlm_anthropic_version", "2023-06-01") or "2023-06-01"
+            )
+        else:
+            api_key = (draft.api_key or "").strip()
+            base_url = (draft.base_url or "").strip()
+            protocol = draft.api_protocol or "openai"
+            anthropic_version = draft.anthropic_version or "2023-06-01"
+
+        if not api_key:
+            self.main.set_models_status(tr("models.need_key"), role=role)
             self.main.set_status(tr("models.need_key"), busy=False)
             return
-        if not (draft.base_url or "").strip():
-            self.main.set_models_status(tr("models.need_url"))
+        if not base_url:
+            self.main.set_models_status(tr("models.need_url"), role=role)
             self.main.set_status(tr("models.need_url"), busy=False)
             return
 
         self._models_fetching = True
-        self.main.set_models_refreshing(True)
-        api_key = draft.api_key
-        base_url = draft.base_url
-        protocol = draft.api_protocol or "openai"
-        anthropic_version = draft.anthropic_version or "2023-06-01"
+        self._models_fetch_role = role
+        self.main.set_models_refreshing(True, role=role)
 
         def work() -> None:
             try:
@@ -685,17 +698,18 @@ class AppController(QObject):
         threading.Thread(target=work, name="list-models", daemon=True).start()
 
     def _on_models_result(self, models: object, error: str) -> None:
+        role = getattr(self, "_models_fetch_role", "translate") or "translate"
         self._models_fetching = False
-        self.main.set_models_refreshing(False)
+        self.main.set_models_refreshing(False, role=role)
         if error or models is None:
             msg = tr("models.failed", err=error or "unknown")
-            self.main.set_models_status(msg)
+            self.main.set_models_status(msg, role=role)
             self.main.set_status(msg, busy=False)
             return
         assert isinstance(models, list)
-        self.main.set_models_list(models, keep_current=True)
+        self.main.set_models_list(models, keep_current=True, role=role)
         msg = tr("models.ok", n=len(models))
-        self.main.set_models_status(msg)
+        self.main.set_models_status(msg, role=role)
         self.main.set_status(msg, busy=False)
 
     def on_monitor_status(self, msg: str) -> None:

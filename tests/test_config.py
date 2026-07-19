@@ -76,6 +76,10 @@ def test_pipeline_mode_and_optional_llm_defaults():
     assert c.ui_language == "zh-Hant"
     assert c.obs_enabled is False
     assert c.obs_port == 8765
+    assert c.llm_timeout_s == 30.0
+    assert c.vlm_timeout_s == 30.0
+    assert not c.has_vlm
+    assert not c.has_translate_llm
 
 
 def test_from_dict_pipeline_and_sampling():
@@ -99,6 +103,46 @@ def test_from_dict_pipeline_and_sampling():
     c2 = AppConfig.from_dict({"pipeline_mode": "nope", "ui_language": "ja"})
     assert c2.pipeline_mode == "ocr"
     assert c2.ui_language == "zh-Hant"
+
+    c3 = AppConfig.from_dict({"pipeline_mode": "vlm_ocr"})
+    assert c3.pipeline_mode == "vlm_ocr"
+
+
+def test_vlm_endpoint_migration_and_independence():
+    # Old config without vlm_* keys: seed VLM from translate
+    c = AppConfig.from_dict(
+        {
+            "api_key": "sk-tr",
+            "base_url": "https://translate.example/v1",
+            "model": "text-model",
+            "api_provider": "openai",
+        }
+    )
+    assert c.vlm_api_key == "sk-tr"
+    assert c.vlm_base_url == "https://translate.example/v1"
+    assert c.vlm_model == "text-model"
+
+    # Explicit vlm_* keys stay independent
+    c2 = AppConfig.from_dict(
+        {
+            "api_key": "sk-tr",
+            "model": "text-model",
+            "vlm_api_key": "sk-vlm",
+            "vlm_model": "vision-model",
+            "vlm_base_url": "https://vision.example/v1",
+        }
+    )
+    assert c2.api_key == "sk-tr"
+    assert c2.model == "text-model"
+    assert c2.vlm_api_key == "sk-vlm"
+    assert c2.vlm_model == "vision-model"
+    assert c2.vlm_base_url == "https://vision.example/v1"
+    assert c2.has_translate_llm and c2.has_vlm
+    te = c2.translate_endpoint()
+    ve = c2.vlm_endpoint()
+    assert te.model == "text-model"
+    assert ve.model == "vision-model"
+    assert te.api_key != ve.api_key
 
 
 def test_abs_region():
