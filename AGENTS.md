@@ -87,6 +87,7 @@ Detect (RegionMonitor)
 - **force**（按鈕／熱鍵）：可清掉等待中的 auto Process 工作；不因「文字未變」跳過。
 - **auto**（監控）：可跳過未變畫面；Process 忙碌時進有界佇列。
 - **兩層緩衝**：CaptureStage 延遲再擷取 ≠ Process 佇列深度；「還有多少 OCR/翻譯在等」以 Process `queue_depth` 為準。
+- **停止監控**：必須 `pipeline.cancel()`（清空佇列 + abort 進行中 job）；UI **不得**等 LLM/HTTP 結束。LLM 以短輪詢 deadline 響應 abort（orphan 執行緒可接受）。停止後 in-flight **auto** capture 不得再 enqueue。
 
 細節與狀態轉換見 `docs/state-machine.md`。
 

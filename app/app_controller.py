@@ -384,12 +384,13 @@ class AppController(QObject):
                 mode = tr("monitor.mode_immediate")
             self.main.set_status(tr("status.monitor_on", mode=mode), busy=False)
         else:
-            # Stop must not wait on OCR/LLM: signal monitor off, drop auto backlog.
+            # Stop must not wait on OCR/LLM: signal monitor off, drop backlog,
+            # and abort in-flight Process (OCR/LLM). HTTP may orphan until timeout.
             self.cfg.auto_monitor = False
             self.monitor.stop(wait=0.15)
             self.capture_stage.reset_deferred()
             with contextlib.suppress(Exception):
-                self.pipeline.clear_auto_queue()
+                self.pipeline.cancel()
             self.main.set_monitor_running(False)
             self.main.sync_operational_monitor(self.cfg)
             with contextlib.suppress(Exception):
@@ -571,6 +572,10 @@ class AppController(QObject):
             with contextlib.suppress(Exception):
                 self.overlay.set_status(tr("status.error"))
             # Still pump deferred captures after a failed grab
+            self._capture_pump_deferred()
+            return
+        # Stop-monitor: drop in-flight auto grabs so they never enter Process.
+        if not force and not self.cfg.auto_monitor:
             self._capture_pump_deferred()
             return
         if was_visible:

@@ -41,6 +41,13 @@ T = TypeVar("T")
 _CB_FAIL_THRESHOLD = 3
 _CB_COOLDOWN_S = 30.0
 
+# Poll interval while waiting on LLM pool threads (abort latency bound)
+_LLM_POLL_S = 0.1
+
+
+class _JobCancelled(Exception):
+    """Internal: job aborted by user cancel or generation invalidate."""
+
 
 @dataclass
 class PipelineResult:
@@ -127,17 +134,11 @@ class _Worker(QObject):
             self.finished.emit(PipelineResult("", "", error=tr("pipe.invalid_job")))
             return
 
-        # Honour abort set before this job started (e.g. shutdown).
-        # After a successful pass through this check, clear sticky abort so the
-        # next intentional job is not skipped after a prior cancel.
+        # Honour abort set before this job started (queued after cancel).
+        # _emit_cancelled consumes sticky abort so the *next* job can run.
         if self._abort:
-            self.finished.emit(
-                PipelineResult(
-                    "", "", skipped=True, status_message=tr("pipe.cancelled")
-                )
-            )
+            self._emit_cancelled()
             return
-        self.clear_abort()
         gen = self._generation
 
         try:
@@ -147,11 +148,7 @@ class _Worker(QObject):
                 return
 
             if self._abort or gen != self._generation:
-                self.finished.emit(
-                    PipelineResult(
-                        "", "", skipped=True, status_message=tr("pipe.cancelled")
-                    )
-                )
+                self._emit_cancelled()
                 return
 
             self.progress.emit(tr("pipe.prep_image", info=describe_image(img)))
@@ -189,18 +186,28 @@ class _Worker(QObject):
         timeout_s: float,
         gen: int,
     ) -> T:
-        """Run fn in a pool thread; raise RuntimeError on wall-clock timeout or abort."""
+        """Run fn in a pool thread; raise on wall-clock timeout or abort.
+
+        Polls in short intervals so stop/cancel can unblock the worker (~100ms)
+        without waiting for the full HTTP timeout. Orphan pool threads may still
+        finish the abandoned request; that is intentional.
+        """
         # Margin so HTTP timeout can fire first when it works
         wall = max(6.0, float(timeout_s) + 5.0)
         future = self._llm_pool.submit(fn)
-        try:
-            result = future.result(timeout=wall)
-        except FuturesTimeout as exc:
-            future.cancel()
-            raise RuntimeError(f"連線逾時（{timeout_s:.0f}s）") from exc
-        if self._abort or gen != self._generation:
-            raise RuntimeError(tr("pipe.cancelled"))
-        return result
+        deadline = time.monotonic() + wall
+        while True:
+            if self._abort or gen != self._generation:
+                future.cancel()  # only if not yet started
+                raise _JobCancelled(tr("pipe.cancelled"))
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                future.cancel()
+                raise RuntimeError(f"連線逾時（{timeout_s:.0f}s）")
+            try:
+                return future.result(timeout=min(_LLM_POLL_S, remaining))
+            except FuturesTimeout:
+                continue
 
     def _call_llm(
         self,
@@ -218,11 +225,21 @@ class _Worker(QObject):
             out = self._run_with_deadline(fn, timeout_s=timeout_s, gen=gen)
             self._breaker.record_success(role)
             return out
+        except _JobCancelled:
+            raise
         except Exception:
             # Do not open the breaker for user cancel / generation invalidate
             if not (self._abort or gen != self._generation):
                 self._breaker.record_failure(role)
             raise
+
+    def _emit_cancelled(self) -> None:
+        # Consume sticky abort: otherwise every later job sees _abort at entry
+        # and reports「已取消」forever (e.g. after stop-monitor once).
+        self.clear_abort()
+        self.finished.emit(
+            PipelineResult("", "", skipped=True, status_message=tr("pipe.cancelled"))
+        )
 
     def _run_ocr(
         self, cfg: AppConfig, img: Image.Image, *, force: bool, gen: int
@@ -232,11 +249,7 @@ class _Worker(QObject):
         self.progress.emit(tr("pipe.ocr_running", backend=backend))
         source = ocr.recognize(img).strip()
         if self._abort or gen != self._generation:
-            self.finished.emit(
-                PipelineResult(
-                    "", "", skipped=True, status_message=tr("pipe.cancelled")
-                )
-            )
+            self._emit_cancelled()
             return
         if not source:
             # No text: refresh status only — do not wipe overlay or last result
@@ -290,11 +303,7 @@ class _Worker(QObject):
             return
 
         if self._abort or gen != self._generation:
-            self.finished.emit(
-                PipelineResult(
-                    "", "", skipped=True, status_message=tr("pipe.cancelled")
-                )
-            )
+            self._emit_cancelled()
             return
 
         self.progress.emit(
@@ -316,6 +325,9 @@ class _Worker(QObject):
                 force=force,
                 gen=gen,
             )
+        except _JobCancelled:
+            self._emit_cancelled()
+            return
         except Exception as exc:
             # Soft error: keep OCR text so UI/OBS stay usable; never hang on API faults.
             self.finished.emit(
@@ -376,11 +388,7 @@ class _Worker(QObject):
             return
 
         if self._abort or gen != self._generation:
-            self.finished.emit(
-                PipelineResult(
-                    "", "", skipped=True, status_message=tr("pipe.cancelled")
-                )
-            )
+            self._emit_cancelled()
             return
 
         self.progress.emit(
@@ -402,6 +410,9 @@ class _Worker(QObject):
                 force=force,
                 gen=gen,
             )
+        except _JobCancelled:
+            self._emit_cancelled()
+            return
         except Exception as exc:
             # Mark frame seen so auto-monitor does not immediately re-spam the same image.
             self._last_image_fp = img_fp
@@ -452,11 +463,7 @@ class _Worker(QObject):
             return
 
         if self._abort or gen != self._generation:
-            self.finished.emit(
-                PipelineResult(
-                    "", "", skipped=True, status_message=tr("pipe.cancelled")
-                )
-            )
+            self._emit_cancelled()
             return
 
         self.progress.emit(tr("pipe.vlm_ocr"))
@@ -472,6 +479,9 @@ class _Worker(QObject):
                 gen=gen,
             )
             source = (source or "").strip()
+        except _JobCancelled:
+            self._emit_cancelled()
+            return
         except Exception as exc:
             self._last_image_fp = img_fp
             self.finished.emit(
@@ -484,11 +494,7 @@ class _Worker(QObject):
             return
 
         if self._abort or gen != self._generation:
-            self.finished.emit(
-                PipelineResult(
-                    "", "", skipped=True, status_message=tr("pipe.cancelled")
-                )
-            )
+            self._emit_cancelled()
             return
 
         if not source:
@@ -561,6 +567,9 @@ class _Worker(QObject):
                 force=force,
                 gen=gen,
             )
+        except _JobCancelled:
+            self._emit_cancelled()
+            return
         except Exception as exc:
             self.finished.emit(
                 PipelineResult(
@@ -700,6 +709,19 @@ class TranslationPipeline(QObject):
         self._queue.clear()
         self._queue.extend(kept)
 
+    def cancel(self) -> None:
+        """Drop all waiting jobs and abort the running job (if any).
+
+        Used by stop-monitor: UI must not stay busy until LLM/HTTP finishes.
+        In-flight HTTP may continue as an orphan pool thread until its own timeout.
+
+        When idle, only clear the queue — do not leave a sticky abort that would
+        cancel the next intentional translate.
+        """
+        self._queue.clear()
+        if self._busy:
+            self._cmd_abort.emit()
+
     def request(
         self,
         cfg: AppConfig,
@@ -744,8 +766,7 @@ class TranslationPipeline(QObject):
         self._cmd_clear_cache.emit()
 
     def shutdown(self) -> None:
-        self._queue.clear()
-        self._cmd_abort.emit()
+        self.cancel()
         # Do not block the UI thread for long — abandon residual LLM work.
         self._thread.quit()
         if not self._thread.wait(1000):

@@ -98,6 +98,7 @@ Worker outcomes (`PipelineResult`): success, `skipped` (unchanged/blank/empty OC
 |--------|--------|
 | Hotkey / tray / “立即翻譯” | `translate_now(force=True)` |
 | `RegionMonitor.region_changed` | `translate_now(force=False)` |
-| Capture thread done | `_on_capture_finished` |
+| Capture thread done | `_on_capture_finished` (drops auto if monitor off) |
 | Pipeline worker done | `on_pipeline_finished` → `_present` |
+| Stop monitor | `monitor.stop` + `pipeline.cancel()` (clear queue + abort in-flight) |
 | Apply / Save / Cancel | settings runtime sync (monitor, hotkey, OBS) |
