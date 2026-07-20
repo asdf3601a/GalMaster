@@ -93,7 +93,9 @@ def capture_screen_region(left: int, top: int, width: int, height: int) -> Image
     )
 
 
-def _capture_gdi_desktop(left: int, top: int, width: int, height: int) -> Image.Image | None:
+def _capture_gdi_desktop(
+    left: int, top: int, width: int, height: int
+) -> Image.Image | None:
     """Fallback desktop BitBlt capture."""
     try:
         import win32con
@@ -357,7 +359,12 @@ def capture_region(
 
                             _cl, _ct, cr, cb = get_client_rect(int(hwnd))
                             cw, ch = max(1, cr), max(1, cb)
-                            if rel_x <= 2 and rel_y <= 2 and rel_w >= cw - 4 and rel_h >= ch - 4:
+                            if (
+                                rel_x <= 2
+                                and rel_y <= 2
+                                and rel_w >= cw - 4
+                                and rel_h >= ch - 4
+                            ):
                                 return full
                         except Exception:
                             pass

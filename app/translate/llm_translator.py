@@ -7,7 +7,6 @@ import io
 import json
 import re
 from typing import Any
-
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
@@ -149,7 +148,10 @@ def build_chat_messages(
         if not src:
             continue
         messages.append(
-            {"role": "user", "content": build_user_prompt(src, source_lang, target_lang)}
+            {
+                "role": "user",
+                "content": build_user_prompt(src, source_lang, target_lang),
+            }
         )
         if tgt:
             messages.append({"role": "assistant", "content": tgt})
@@ -212,13 +214,15 @@ def parse_vlm_response(raw: str) -> tuple[str, str]:
     )
     tr_m = re.search(r"(?is)TRANSLATION\s*:\s*(.*)\s*$", text)
     if tr_m:
-        source = (src_m.group(1).strip() if src_m else "")
+        source = src_m.group(1).strip() if src_m else ""
         translated = tr_m.group(1).strip()
         return source, translated
     return "", text
 
 
-def image_to_jpeg_b64(img: Image.Image, *, max_edge: int = _VLM_MAX_EDGE) -> tuple[str, str]:
+def image_to_jpeg_b64(
+    img: Image.Image, *, max_edge: int = _VLM_MAX_EDGE
+) -> tuple[str, str]:
     """Return (base64, media_type) for a JPEG suitable for vision APIs."""
     rgb = img.convert("RGB")
     w, h = rgb.size
@@ -401,10 +405,7 @@ def _extract_model_ids(payload: Any) -> list[str]:
             mid = item.strip()
         elif isinstance(item, dict):
             mid = str(
-                item.get("id")
-                or item.get("name")
-                or item.get("model")
-                or ""
+                item.get("id") or item.get("name") or item.get("model") or ""
             ).strip()
         if mid and mid not in seen:
             seen.add(mid)
@@ -463,7 +464,9 @@ def list_models(
         if time.monotonic() - started > budget:
             break
         pages += 1
-        page_timeout = min(float(timeout), max(5.0, budget - (time.monotonic() - started)))
+        page_timeout = min(
+            float(timeout), max(5.0, budget - (time.monotonic() - started))
+        )
         data = _http_json(
             "GET", next_url, headers=headers, body=None, timeout=page_timeout
         )
@@ -530,7 +533,9 @@ class LLMTranslator:
         except (TypeError, ValueError):
             self.timeout_s = DEFAULT_LLM_TIMEOUT_S
         if self.protocol not in ("openai", "anthropic"):
-            raise ValueError(f"不支援的 API 協議: {protocol}（請用 openai 或 anthropic）")
+            raise ValueError(
+                f"不支援的 API 協議: {protocol}（請用 openai 或 anthropic）"
+            )
 
     @classmethod
     def from_endpoint(cls, ep: Any) -> LLMTranslator:
@@ -551,7 +556,9 @@ class LLMTranslator:
             presence_penalty=getattr(ep, "presence_penalty", None),
             reasoning_effort=getattr(ep, "reasoning_effort", "") or "",
             seed=getattr(ep, "seed", None),
-            timeout_s=float(getattr(ep, "timeout_s", DEFAULT_LLM_TIMEOUT_S) or DEFAULT_LLM_TIMEOUT_S),
+            timeout_s=float(
+                getattr(ep, "timeout_s", DEFAULT_LLM_TIMEOUT_S) or DEFAULT_LLM_TIMEOUT_S
+            ),
         )
 
     def _sampling(self) -> dict[str, Any]:
@@ -798,7 +805,10 @@ class LLMTranslator:
             },
             {"type": "text", "text": user_text},
         ]
-        messages: list[dict[str, Any]] = [*history_msgs, {"role": "user", "content": user_content}]
+        messages: list[dict[str, Any]] = [
+            *history_msgs,
+            {"role": "user", "content": user_content},
+        ]
         sampling = self._sampling()
         payload: dict[str, Any] = {
             "model": self.model,

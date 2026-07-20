@@ -54,7 +54,9 @@ class RegionSelector(QWidget):
             # Clear selection area
             painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_Clear)
             painter.fillRect(rect, Qt.GlobalColor.transparent)
-            painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceOver)
+            painter.setCompositionMode(
+                QPainter.CompositionMode.CompositionMode_SourceOver
+            )
             pen = QPen(QColor(100, 140, 255), 2)
             painter.setPen(pen)
             painter.drawRect(rect.adjusted(0, 0, -1, -1))
@@ -85,7 +87,11 @@ class RegionSelector(QWidget):
             self.update()
 
     def mouseReleaseEvent(self, event) -> None:  # noqa: N802
-        if event.button() == Qt.MouseButton.LeftButton and self._origin and self._current:
+        if (
+            event.button() == Qt.MouseButton.LeftButton
+            and self._origin
+            and self._current
+        ):
             rect = QRect(self._origin, self._current).normalized()
             self._finish()
             if rect.width() >= 4 and rect.height() >= 4:

@@ -237,9 +237,7 @@ class OneOCREngine:
             f.restype = restype
             return f
 
-        self._CreateOcrInitOptions = bind(
-            "CreateOcrInitOptions", [POINTER(c_int64)]
-        )
+        self._CreateOcrInitOptions = bind("CreateOcrInitOptions", [POINTER(c_int64)])
         self._OcrInitOptionsSetUseModelDelayLoad = bind(
             "OcrInitOptionsSetUseModelDelayLoad", [c_int64, c_char]
         )
@@ -257,19 +255,11 @@ class OneOCREngine:
             "RunOcrPipeline",
             [c_int64, POINTER(_Img), c_int64, POINTER(c_int64)],
         )
-        self._GetOcrLineCount = bind(
-            "GetOcrLineCount", [c_int64, POINTER(c_int64)]
-        )
-        self._GetOcrLine = bind(
-            "GetOcrLine", [c_int64, c_int64, POINTER(c_int64)]
-        )
-        self._GetOcrLineContent = bind(
-            "GetOcrLineContent", [c_int64, POINTER(c_int64)]
-        )
+        self._GetOcrLineCount = bind("GetOcrLineCount", [c_int64, POINTER(c_int64)])
+        self._GetOcrLine = bind("GetOcrLine", [c_int64, c_int64, POINTER(c_int64)])
+        self._GetOcrLineContent = bind("GetOcrLineContent", [c_int64, POINTER(c_int64)])
         self._ReleaseOcrResult = bind("ReleaseOcrResult", [c_int64])
-        self._ReleaseOcrProcessOptions = bind(
-            "ReleaseOcrProcessOptions", [c_int64]
-        )
+        self._ReleaseOcrProcessOptions = bind("ReleaseOcrProcessOptions", [c_int64])
         self._ReleaseOcrPipeline = bind("ReleaseOcrPipeline", [c_int64])
         self._ReleaseOcrInitOptions = bind("ReleaseOcrInitOptions", [c_int64])
 
@@ -354,9 +344,11 @@ class OneOCREngine:
                     self._GetOcrLineContent(line, byref(content))
                     if not content.value:
                         continue
-                    s = ctypes.string_at(content.value).decode(
-                        "utf-8", errors="replace"
-                    ).strip()
+                    s = (
+                        ctypes.string_at(content.value)
+                        .decode("utf-8", errors="replace")
+                        .strip()
+                    )
                     if s:
                         lines.append(s)
                 return "\n".join(lines).strip()

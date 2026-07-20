@@ -9,7 +9,7 @@ import pytest
 
 pytest.importorskip("PySide6")
 
-from PySide6.QtCore import QCoreApplication
+from PySide6.QtWidgets import QApplication
 
 from app.capture.monitor import RegionMonitor
 from app.config import AppConfig
@@ -17,9 +17,10 @@ from app.config import AppConfig
 
 @pytest.fixture()
 def qapp():
-    app = QCoreApplication.instance()
+    # Prefer QApplication so later widget tests in the same process keep working.
+    app = QApplication.instance()
     if app is None:
-        app = QCoreApplication(sys.argv)
+        app = QApplication(sys.argv)
     return app
 
 
@@ -58,7 +59,9 @@ def test_monitor_stop_exits_thread_quickly(qapp):
 
 def test_monitor_start_stop_start(qapp):
     mon = RegionMonitor()
-    cfg = AppConfig(region_w=4, region_h=4, monitor_interval_ms=200, monitor_stable_ms=0)
+    cfg = AppConfig(
+        region_w=4, region_h=4, monitor_interval_ms=200, monitor_stable_ms=0
+    )
     for _ in range(3):
         mon.start(cfg)
         assert mon.is_running
@@ -70,7 +73,9 @@ def test_monitor_start_stop_start(qapp):
 def test_monitor_per_generation_stop_event(qapp):
     """start() must use a new Event so a late zombie cannot be revived by clear()."""
     mon = RegionMonitor()
-    cfg = AppConfig(region_w=4, region_h=4, monitor_interval_ms=200, monitor_stable_ms=0)
+    cfg = AppConfig(
+        region_w=4, region_h=4, monitor_interval_ms=200, monitor_stable_ms=0
+    )
     mon.start(cfg)
     ev1 = mon._stop
     mon.stop()

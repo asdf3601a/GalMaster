@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-from copy import deepcopy
 import threading
+from copy import deepcopy
 
 from PySide6.QtCore import QObject, QTimer, Signal
 from PySide6.QtGui import QAction, QGuiApplication
-from PySide6.QtWidgets import QApplication, QSystemTrayIcon, QMenu, QStyle
+from PySide6.QtWidgets import QApplication, QMenu, QStyle, QSystemTrayIcon
 
 from app.capture.monitor import RegionMonitor
 from app.capture.screenshot import capture_from_config
@@ -65,7 +65,11 @@ class AppController(QObject):
         if self.cfg.auto_monitor and self.cfg.has_region:
             self.monitor.start(self.cfg)
         self.main.set_monitor_running(self.monitor.is_running)
-        if self.cfg.auto_monitor and self.cfg.has_region and not self.monitor.is_running:
+        if (
+            self.cfg.auto_monitor
+            and self.cfg.has_region
+            and not self.monitor.is_running
+        ):
             self.cfg.auto_monitor = False
 
         self.overlay.setGeometry(
@@ -90,7 +94,9 @@ class AppController(QObject):
         self._tray_overlay_action = QAction(tr("tray.overlay_hide"), self)
         self._tray_overlay_action.triggered.connect(self.toggle_overlay)
         self._tray_translate_action = QAction(tr("tray.translate"), self)
-        self._tray_translate_action.triggered.connect(lambda: self.translate_now(force=True))
+        self._tray_translate_action.triggered.connect(
+            lambda: self.translate_now(force=True)
+        )
         self._tray_quit_action = QAction(tr("tray.quit"), self)
         self._tray_quit_action.triggered.connect(self.shutdown)
         menu.addAction(self._tray_show_action)
@@ -163,7 +169,10 @@ class AppController(QObject):
 
     def _on_overlay_visibility(self, visible: bool) -> None:
         self.main.set_overlay_button_state(visible)
-        if hasattr(self, "_tray_overlay_action") and self._tray_overlay_action is not None:
+        if (
+            hasattr(self, "_tray_overlay_action")
+            and self._tray_overlay_action is not None
+        ):
             self._tray_overlay_action.setText(
                 tr("tray.overlay_hide") if visible else tr("tray.overlay_show")
             )
@@ -267,7 +276,11 @@ class AppController(QObject):
     def on_cancel_settings(self) -> None:
         self.main.set_config(self.cfg)
         # Restore auto-monitor UI state vs runtime
-        if self.cfg.auto_monitor and self.cfg.has_region and not self.monitor.is_running:
+        if (
+            self.cfg.auto_monitor
+            and self.cfg.has_region
+            and not self.monitor.is_running
+        ):
             self.monitor.start(self.cfg)
         elif not self.cfg.auto_monitor and self.monitor.is_running:
             self.monitor.stop()
@@ -392,9 +405,7 @@ class AppController(QObject):
         try:
             hwnd = int(self.main.winId())
             self.hotkey.register(hwnd, self.cfg.hotkey)
-            self.main.set_status(
-                tr("status.hotkey_registered", hotkey=self.cfg.hotkey)
-            )
+            self.main.set_status(tr("status.hotkey_registered", hotkey=self.cfg.hotkey))
         except Exception as exc:
             self.main.set_status(tr("status.hotkey_failed", err=exc))
 
@@ -584,9 +595,7 @@ class AppController(QObject):
         depth = self.pipeline.queue_depth
         if depth > 0:
             cap = buffer_cap(getattr(self.cfg, "pipeline_buffer_size", 3))
-            self.main.set_status(
-                tr("pipe.queued", n=depth, max=cap), busy=True
-            )
+            self.main.set_status(tr("pipe.queued", n=depth, max=cap), busy=True)
         self._capture_pump_deferred()
 
     def _capture_pump_deferred(self) -> None:

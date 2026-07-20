@@ -112,7 +112,11 @@ class GlobalHotkeyFilter(QAbstractNativeEventFilter, QObject):
     def nativeEventFilter(self, eventType, message):  # noqa: N802
         # PySide6: eventType is bytes/str, message is sip.voidptr
         try:
-            et = bytes(eventType).decode() if isinstance(eventType, (bytes, bytearray)) else str(eventType)
+            et = (
+                bytes(eventType).decode()
+                if isinstance(eventType, (bytes, bytearray))
+                else str(eventType)
+            )
         except Exception:
             et = str(eventType)
         if et not in ("windows_generic_MSG", "windows_dispatcher_MSG"):

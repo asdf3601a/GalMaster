@@ -98,8 +98,8 @@ def _match_qt_screens_to_mss() -> list[tuple[object, dict]] | None:
     Returns list of (QScreen, mss_monitor) or None if counts mismatch / mss fails.
     """
     try:
-        from PySide6.QtGui import QGuiApplication
         import mss
+        from PySide6.QtGui import QGuiApplication
     except Exception:
         return None
 
@@ -116,7 +116,7 @@ def _match_qt_screens_to_mss() -> list[tuple[object, dict]] | None:
         return None
     q_sorted = sorted(screens, key=lambda s: (s.geometry().left(), s.geometry().top()))
     m_sorted = sorted(mons, key=lambda m: (int(m["left"]), int(m["top"])))
-    return list(zip(q_sorted, m_sorted))
+    return list(zip(q_sorted, m_sorted, strict=False))
 
 
 def _screen_at_logical(x: int, y: int):
@@ -223,7 +223,11 @@ def _hwnd_on_screen(screen) -> int | None:
         if hwnd:
             # Climb to root owner
             GA_ROOT = 2
-            root = user32.GetAncestor(hwnd, GA_ROOT) if hasattr(user32, "GetAncestor") else hwnd
+            root = (
+                user32.GetAncestor(hwnd, GA_ROOT)
+                if hasattr(user32, "GetAncestor")
+                else hwnd
+            )
             return int(root or hwnd)
     except Exception:
         pass
@@ -275,7 +279,9 @@ def qt_rect_to_physical(
     return px, py, pw, ph
 
 
-def physical_size_to_qt(w: int, h: int, scale: ScaleInfo | None = None) -> tuple[int, int]:
+def physical_size_to_qt(
+    w: int, h: int, scale: ScaleInfo | None = None
+) -> tuple[int, int]:
     """Scale physical size down to Qt logical size (for labels only)."""
     info = scale or probe_scale()
     if info.is_identity:

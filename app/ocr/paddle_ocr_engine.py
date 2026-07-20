@@ -75,7 +75,9 @@ def _extract_native_texts(result) -> list[str]:
                     if texts is None and hasattr(page, "json"):
                         j = page.json
                         if isinstance(j, dict):
-                            texts = j.get("rec_texts") or j.get("res", {}).get("rec_texts")
+                            texts = j.get("rec_texts") or j.get("res", {}).get(
+                                "rec_texts"
+                            )
                 if texts:
                     for t in texts:
                         s = clean_ocr_line(str(t))

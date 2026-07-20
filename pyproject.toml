@@ -22,6 +22,7 @@ dependencies = [
 [project.optional-dependencies]
 dev = [
     "pytest>=8.0.0",
+    "ruff>=0.9.0",
 ]
 manga = [
     "manga-ocr>=0.1.12",
@@ -45,6 +46,45 @@ packages = ["app"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 88
+src = ["app", "tests"]
+extend-exclude = [
+    ".venv",
+    "models",
+    "tools",
+    "debug_ocr",
+]
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle errors
+    "W",   # pycodestyle warnings
+    "F",   # pyflakes
+    "I",   # isort
+    "UP",  # pyupgrade
+    "B",   # flake8-bugbear
+    "SIM", # flake8-simplify
+]
+ignore = [
+    "E501",   # line length owned by formatter
+    "SIM105", # intentional soft-fail try/except pass (Qt / Win32 paths)
+    "SIM102", # nested ifs often clearer with stage comments
+    "SIM103", # prefer explicit early returns over inverted one-liners
+    "SIM118", # Qt APIs (e.g. QStyleFactory.keys()) are not dict.keys()
+    "UP042",  # keep str, Enum until StrEnum migration is intentional
+    "UP047",  # keep TypeVar generics until PEP 695 migration is intentional
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["app"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+line-ending = "auto"
 
 [tool.uv]
 package = true

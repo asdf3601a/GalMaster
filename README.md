@@ -31,7 +31,13 @@ uv run galmaster
 # 測試
 uv run pytest -q
 uv run python scripts/smoke_headless.py
+
+# 格式化 / 靜態檢查（Ruff）
+uv run ruff format app tests
+uv run ruff check app tests
 ```
+
+開發與 agent 約定見 [AGENTS.md](AGENTS.md)。
 
 ## 管線模式
 

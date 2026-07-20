@@ -88,7 +88,11 @@ class ColorButton(QPushButton):
             c = "#ffffff"
         self._color = c.lower()
         # Readable label contrast
-        r, g, b = int(self._color[1:3], 16), int(self._color[3:5], 16), int(self._color[5:7], 16)
+        r, g, b = (
+            int(self._color[1:3], 16),
+            int(self._color[3:5], 16),
+            int(self._color[5:7], 16),
+        )
         lum = 0.299 * r + 0.587 * g + 0.114 * b
         fg = "#111111" if lum > 160 else "#ffffff"
         self.setText(self._color)

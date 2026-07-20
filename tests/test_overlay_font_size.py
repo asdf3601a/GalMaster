@@ -11,7 +11,11 @@ from PySide6.QtWidgets import QApplication, QStyleFactory  # noqa: E402
 
 from app.config import AppConfig  # noqa: E402
 from app.ui.overlay_window import OverlayWindow  # noqa: E402
-from app.ui.styles import MAIN_STYLE, apply_dark_palette, overlay_panel_style  # noqa: E402
+from app.ui.styles import (  # noqa: E402
+    MAIN_STYLE,
+    apply_dark_palette,
+    overlay_panel_style,
+)
 
 
 @pytest.fixture(scope="module")
@@ -19,6 +23,10 @@ def qapp():
     app = QApplication.instance()
     if app is None:
         app = QApplication([])
+    if not isinstance(app, QApplication):
+        pytest.skip(
+            "QApplication required; QCoreApplication already exists in this process"
+        )
     if "Fusion" in QStyleFactory.keys():
         app.setStyle("Fusion")
     apply_dark_palette(app)

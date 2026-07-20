@@ -29,7 +29,9 @@ def wgc_available() -> bool:
         return False
 
 
-def capture_hwnd_wgc(hwnd: int, *, timeout_s: float = _WGC_TIMEOUT_S) -> Image.Image | None:
+def capture_hwnd_wgc(
+    hwnd: int, *, timeout_s: float = _WGC_TIMEOUT_S
+) -> Image.Image | None:
     """
     Capture one full-window frame for *hwnd* via WGC.
 

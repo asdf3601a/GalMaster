@@ -1,4 +1,7 @@
 from app.translate.llm_translator import (
+    _extract_model_ids,
+    _normalize_anthropic_base,
+    _normalize_openai_base,
     build_chat_messages,
     build_sampling_payload,
     build_system_prompt,
@@ -9,9 +12,6 @@ from app.translate.llm_translator import (
     parse_vlm_response,
     sampling_fingerprint,
     strip_ocr_response,
-    _extract_model_ids,
-    _normalize_anthropic_base,
-    _normalize_openai_base,
 )
 from app.translate.providers import PROVIDER_PRESETS, get_preset
 
@@ -25,9 +25,18 @@ def test_presets_cover_both_protocols():
 
 
 def test_normalize_bases():
-    assert _normalize_openai_base("https://api.openai.com/v1/") == "https://api.openai.com/v1"
-    assert _normalize_anthropic_base("https://api.anthropic.com") == "https://api.anthropic.com"
-    assert _normalize_anthropic_base("https://api.anthropic.com/v1") == "https://api.anthropic.com"
+    assert (
+        _normalize_openai_base("https://api.openai.com/v1/")
+        == "https://api.openai.com/v1"
+    )
+    assert (
+        _normalize_anthropic_base("https://api.anthropic.com")
+        == "https://api.anthropic.com"
+    )
+    assert (
+        _normalize_anthropic_base("https://api.anthropic.com/v1")
+        == "https://api.anthropic.com"
+    )
 
 
 def test_prompts():
@@ -44,9 +53,7 @@ def test_chat_messages_sliding_window():
         ("おはよう", "早安"),
         ("元気？", "還好嗎？"),
     ]
-    msgs = build_chat_messages(
-        "うん", "ja", "zh-Hant", history=history
-    )
+    msgs = build_chat_messages("うん", "ja", "zh-Hant", history=history)
     # 2 history turns * 2 + 1 current user
     assert len(msgs) == 5
     assert msgs[0]["role"] == "user"
@@ -96,7 +103,9 @@ def test_sampling_payload_top_k_zero_omitted():
 def test_sampling_payload_reasoning():
     assert build_sampling_payload(reasoning_effort="") == {}
     assert build_sampling_payload(reasoning_effort="  ") == {}
-    assert build_sampling_payload(reasoning_effort="high") == {"reasoning_effort": "high"}
+    assert build_sampling_payload(reasoning_effort="high") == {
+        "reasoning_effort": "high"
+    }
 
 
 def test_sampling_payload_anthropic_filters():

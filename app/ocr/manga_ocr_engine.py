@@ -14,9 +14,7 @@ class MangaOCREngine:
         try:
             from manga_ocr import MangaOcr
         except ImportError as exc:
-            raise ImportError(
-                "manga-ocr 未安裝。請執行: uv sync"
-            ) from exc
+            raise ImportError("manga-ocr 未安裝。請執行: uv sync") from exc
         self._ocr = MangaOcr()
 
     @property

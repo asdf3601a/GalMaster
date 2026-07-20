@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections import deque
-from typing import Any, Deque, TypeVar
+from typing import Any, TypeVar
 
 from app.config import (
     PIPELINE_BUFFER_DEFAULT,
@@ -21,13 +21,13 @@ def buffer_cap(value: Any) -> int:
 
 
 def enqueue_job(
-    queue: Deque[T],
+    queue: deque[T],
     job: T,
     *,
     cap: int,
     force: bool = False,
     is_force: Any | None = None,
-) -> Deque[T]:
+) -> deque[T]:
     """
     Push *job* into a bounded waiting queue (does not include the running job).
 
@@ -59,7 +59,7 @@ def enqueue_job(
     return queue
 
 
-def make_queue(maxlen_hint: int | None = None) -> Deque[Any]:
+def make_queue(maxlen_hint: int | None = None) -> deque[Any]:
     """Create an unbounded deque; capacity is enforced by enqueue_job."""
     _ = maxlen_hint  # capacity applied at enqueue time (config can change)
     return deque()

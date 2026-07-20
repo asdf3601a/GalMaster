@@ -2,15 +2,13 @@
 
 from __future__ import annotations
 
-from pathlib import Path
-
 import pytest
 
 pytest.importorskip("PySide6")
 
 from app.ui.styles import (  # noqa: E402
-    MAIN_STYLE,
     _ASSETS,
+    MAIN_STYLE,
     ensure_indicator_assets,
 )
 

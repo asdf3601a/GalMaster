@@ -49,7 +49,9 @@ def test_ocr_engine_default_oneocr():
 
 
 def test_from_dict_normalizes_legacy_ocr_and_stable():
-    c = AppConfig.from_dict({"ocr_engine": "auto", "monitor_wait_stable": False, "monitor_stable_ms": 800})
+    c = AppConfig.from_dict(
+        {"ocr_engine": "auto", "monitor_wait_stable": False, "monitor_stable_ms": 800}
+    )
     assert c.ocr_engine == "oneocr"
     assert c.monitor_stable_ms == 0
     assert c.monitor_wait_stable is False

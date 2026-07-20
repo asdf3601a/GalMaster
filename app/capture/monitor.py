@@ -182,9 +182,11 @@ class RegionMonitor(QObject):
             try:
                 # Change detection uses cheap GDI/bitblt path — full WGC is reserved
                 # for the translation Capture stage to avoid lag + lock contention.
-                mon_method = str(
-                    getattr(cfg, "window_capture_method", "auto") or "auto"
-                ).strip().lower()
+                mon_method = (
+                    str(getattr(cfg, "window_capture_method", "auto") or "auto")
+                    .strip()
+                    .lower()
+                )
                 if mon_method != "wgc":
                     mon_method = "bitblt"
                 img = capture_from_config(cfg, method=mon_method)
@@ -227,7 +229,9 @@ class RegionMonitor(QObject):
                                 held = now - self._stable_since
                                 need = stable_s
                                 pct = (
-                                    min(100, int(100 * held / need)) if need > 0 else 100
+                                    min(100, int(100 * held / need))
+                                    if need > 0
+                                    else 100
                                 )
                                 status_msg = tr(
                                     "monitor.stable_progress",

@@ -11,7 +11,6 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
-
 APP_NAME = "GalMaster"
 _DPAPI_PREFIX = "dpapi:"
 
@@ -120,7 +119,9 @@ def clamp_llm_timeout_s(value: Any, default: float = LLM_TIMEOUT_DEFAULT) -> flo
 
 def normalize_hex_color(value: Any, default: str) -> str:
     """Normalize to #RRGGBB; invalid values fall back to default."""
-    fallback = default if isinstance(default, str) and default.startswith("#") else "#ffffff"
+    fallback = (
+        default if isinstance(default, str) and default.startswith("#") else "#ffffff"
+    )
     if value is None:
         return fallback
     s = str(value).strip()
@@ -157,7 +158,11 @@ def _normalize_optional_sampling_fields(obj: Any, fields: tuple[str, ...]) -> No
             setattr(obj, opt, None)
             continue
         try:
-            if opt in ("top_k", "seed") or opt.endswith("_top_k") or opt.endswith("_seed"):
+            if (
+                opt in ("top_k", "seed")
+                or opt.endswith("_top_k")
+                or opt.endswith("_seed")
+            ):
                 iv = int(val)
                 if opt.endswith("top_k") or opt == "top_k":
                     if iv <= 0:
@@ -381,7 +386,9 @@ class AppConfig:
             custom_prompt=self.custom_prompt,
             anthropic_version=self.anthropic_version,
             max_tokens=int(self.max_tokens or 2048),
-            timeout_s=clamp_llm_timeout_s(getattr(self, "llm_timeout_s", LLM_TIMEOUT_DEFAULT)),
+            timeout_s=clamp_llm_timeout_s(
+                getattr(self, "llm_timeout_s", LLM_TIMEOUT_DEFAULT)
+            ),
             temperature=self.temperature,
             top_p=self.top_p,
             top_k=self.top_k,
@@ -401,7 +408,9 @@ class AppConfig:
             custom_prompt=self.vlm_custom_prompt,
             anthropic_version=self.vlm_anthropic_version,
             max_tokens=int(self.vlm_max_tokens or 2048),
-            timeout_s=clamp_llm_timeout_s(getattr(self, "vlm_timeout_s", LLM_TIMEOUT_DEFAULT)),
+            timeout_s=clamp_llm_timeout_s(
+                getattr(self, "vlm_timeout_s", LLM_TIMEOUT_DEFAULT)
+            ),
             temperature=self.vlm_temperature,
             top_p=self.vlm_top_p,
             top_k=self.vlm_top_k,
@@ -472,9 +481,7 @@ class AppConfig:
         ui_lang = (getattr(cfg, "ui_language", "zh-Hant") or "zh-Hant").strip()
         cfg.ui_language = ui_lang if ui_lang in ("zh-Hant", "en") else "zh-Hant"
         wcm = (getattr(cfg, "window_capture_method", "auto") or "auto").strip().lower()
-        cfg.window_capture_method = (
-            wcm if wcm in ("auto", "wgc", "bitblt") else "auto"
-        )
+        cfg.window_capture_method = wcm if wcm in ("auto", "wgc", "bitblt") else "auto"
         cfg.pipeline_buffer_size = clamp_pipeline_buffer_size(
             getattr(cfg, "pipeline_buffer_size", 3)
         )
@@ -492,7 +499,9 @@ class AppConfig:
             getattr(cfg, "vlm_timeout_s", LLM_TIMEOUT_DEFAULT)
         )
         try:
-            cfg.max_tokens = max(64, min(128000, int(getattr(cfg, "max_tokens", 2048) or 2048)))
+            cfg.max_tokens = max(
+                64, min(128000, int(getattr(cfg, "max_tokens", 2048) or 2048))
+            )
         except (TypeError, ValueError):
             cfg.max_tokens = 2048
         try:
@@ -530,7 +539,9 @@ class AppConfig:
             p = (getattr(cfg, proto_attr, "openai") or "openai").strip().lower()
             setattr(cfg, proto_attr, p if p in ("openai", "anthropic") else "openai")
         try:
-            cfg.obs_port = max(1, min(65535, int(getattr(cfg, "obs_port", 8765) or 8765)))
+            cfg.obs_port = max(
+                1, min(65535, int(getattr(cfg, "obs_port", 8765) or 8765))
+            )
         except (TypeError, ValueError):
             cfg.obs_port = 8765
 
@@ -545,14 +556,18 @@ class AppConfig:
                 cfg.overlay_translation_font_size, 10, 72, 16
             )
         if not has_ov_src_sz:
-            cfg.overlay_source_font_size = max(10, cfg.overlay_translation_font_size - 2)
+            cfg.overlay_source_font_size = max(
+                10, cfg.overlay_translation_font_size - 2
+            )
         else:
             cfg.overlay_source_font_size = _clamp_int(
                 cfg.overlay_source_font_size, 10, 72, 14
             )
         cfg.overlay_font_size = cfg.overlay_translation_font_size
         cfg.overlay_show_source = bool(getattr(cfg, "overlay_show_source", True))
-        cfg.overlay_show_translation = bool(getattr(cfg, "overlay_show_translation", True))
+        cfg.overlay_show_translation = bool(
+            getattr(cfg, "overlay_show_translation", True)
+        )
         if not cfg.overlay_show_source and not cfg.overlay_show_translation:
             cfg.overlay_show_translation = True
         cfg.overlay_font_family = str(getattr(cfg, "overlay_font_family", "") or "")
@@ -562,7 +577,9 @@ class AppConfig:
         cfg.overlay_translation_color = normalize_hex_color(
             getattr(cfg, "overlay_translation_color", None), "#ffffff"
         )
-        cfg.overlay_translation_bold = bool(getattr(cfg, "overlay_translation_bold", True))
+        cfg.overlay_translation_bold = bool(
+            getattr(cfg, "overlay_translation_bold", True)
+        )
         cfg.overlay_text_align = _normalize_text_align(
             getattr(cfg, "overlay_text_align", "left"), "left"
         )

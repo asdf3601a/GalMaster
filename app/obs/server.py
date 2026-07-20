@@ -9,7 +9,6 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 from urllib.parse import urlparse
 
-
 _HTML_TEMPLATE = """<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -243,7 +242,11 @@ class ObsSubtitleServer:
 
     @property
     def running(self) -> bool:
-        return self._httpd is not None and self._thread is not None and self._thread.is_alive()
+        return (
+            self._httpd is not None
+            and self._thread is not None
+            and self._thread.is_alive()
+        )
 
     @property
     def port(self) -> int:
@@ -394,7 +397,7 @@ class ObsSubtitleServer:
                     server_ref._subscribers.append(ev)
                     payload = json.dumps(server_ref._state, ensure_ascii=False)
                 try:
-                    self.wfile.write(f"data: {payload}\n\n".encode("utf-8"))
+                    self.wfile.write(f"data: {payload}\n\n".encode())
                     self.wfile.flush()
                     while server_ref.running:
                         if ev.wait(timeout=15.0):
@@ -403,7 +406,7 @@ class ObsSubtitleServer:
                                 payload = json.dumps(
                                     server_ref._state, ensure_ascii=False
                                 )
-                            self.wfile.write(f"data: {payload}\n\n".encode("utf-8"))
+                            self.wfile.write(f"data: {payload}\n\n".encode())
                             self.wfile.flush()
                         else:
                             # keepalive comment

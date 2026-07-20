@@ -169,11 +169,15 @@ class MainWindow(QMainWindow):
         row.setSpacing(6)
 
         self.btn_start_monitor = QPushButton()
-        self.btn_start_monitor.clicked.connect(lambda: self.auto_monitor_toggled.emit(True))
+        self.btn_start_monitor.clicked.connect(
+            lambda: self.auto_monitor_toggled.emit(True)
+        )
 
         self.btn_stop_monitor = QPushButton()
         self.btn_stop_monitor.setObjectName("secondary")
-        self.btn_stop_monitor.clicked.connect(lambda: self.auto_monitor_toggled.emit(False))
+        self.btn_stop_monitor.clicked.connect(
+            lambda: self.auto_monitor_toggled.emit(False)
+        )
 
         self.settings_hint = QLabel()
         self.settings_hint.setObjectName("hint")
@@ -259,7 +263,9 @@ class MainWindow(QMainWindow):
 
         mon = QFormLayout()
         mon.setSpacing(6)
-        mon.setLabelAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        mon.setLabelAlignment(
+            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
+        )
         mon.setFormAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
         mon.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
 
@@ -420,9 +426,7 @@ class MainWindow(QMainWindow):
         try:
             from app.config import clamp_pipeline_buffer_size
 
-            buf_n = clamp_pipeline_buffer_size(
-                getattr(cfg, "pipeline_buffer_size", 3)
-            )
+            buf_n = clamp_pipeline_buffer_size(getattr(cfg, "pipeline_buffer_size", 3))
         except Exception:
             buf_n = 3
         self.buffer_spin.setValue(buf_n)
@@ -616,9 +620,7 @@ class MainWindow(QMainWindow):
         self.timeout_spin.setDecimals(0)
         self.timeout_spin.setSingleStep(5.0)
         self._expand_field(self.timeout_spin)
-        self.timeout_spin.setValue(
-            float(getattr(cfg, "llm_timeout_s", 30) or 30)
-        )
+        self.timeout_spin.setValue(float(getattr(cfg, "llm_timeout_s", 30) or 30))
         self.timeout_spin.valueChanged.connect(self._mark_dirty)
         self._add_form_label(form, "label.llm_timeout", self.timeout_spin)
 
@@ -695,15 +697,17 @@ class MainWindow(QMainWindow):
         raw_effort = (getattr(cfg, "reasoning_effort", "") or "").strip().lower()
         effort_enabled = raw_effort in ("none", "low", "medium", "high")
         # Match optional sampling rows: ☑ + expanding field (omit when unchecked)
-        self.reasoning_chk, self.reasoning_combo, reasoning_w = self._make_optional_combo(
-            items=[
-                ("none", "none"),
-                ("low", "low"),
-                ("medium", "medium"),
-                ("high", "high"),
-            ],
-            current=raw_effort if effort_enabled else "none",
-            enabled=effort_enabled,
+        self.reasoning_chk, self.reasoning_combo, reasoning_w = (
+            self._make_optional_combo(
+                items=[
+                    ("none", "none"),
+                    ("low", "low"),
+                    ("medium", "medium"),
+                    ("high", "high"),
+                ],
+                current=raw_effort if effort_enabled else "none",
+                enabled=effort_enabled,
+            )
         )
         self._add_form_label(adv, "label.reasoning", reasoning_w)
 
@@ -772,7 +776,9 @@ class MainWindow(QMainWindow):
             self.vlm_provider_combo,
             getattr(cfg, "vlm_api_provider", "xai") or "xai",
         )
-        self.vlm_provider_combo.currentIndexChanged.connect(self._on_vlm_provider_changed)
+        self.vlm_provider_combo.currentIndexChanged.connect(
+            self._on_vlm_provider_changed
+        )
 
         self.vlm_api_meta_label = QLabel("")
         self.vlm_api_meta_label.setObjectName("hint")
@@ -794,11 +800,11 @@ class MainWindow(QMainWindow):
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
         )
         if self.vlm_model_combo.lineEdit() is not None:
-            self.vlm_model_combo.lineEdit().setText(
-                getattr(cfg, "vlm_model", "") or ""
-            )
+            self.vlm_model_combo.lineEdit().setText(getattr(cfg, "vlm_model", "") or "")
             self.vlm_model_combo.lineEdit().textChanged.connect(self._mark_dirty)
-        self.vlm_model_combo.currentIndexChanged.connect(self._on_vlm_model_combo_changed)
+        self.vlm_model_combo.currentIndexChanged.connect(
+            self._on_vlm_model_combo_changed
+        )
         self._vlm_model_ids: list[str] = []
 
         self.btn_vlm_refresh_models = QPushButton()
@@ -847,9 +853,7 @@ class MainWindow(QMainWindow):
         self.vlm_timeout_spin.setDecimals(0)
         self.vlm_timeout_spin.setSingleStep(5.0)
         self._expand_field(self.vlm_timeout_spin)
-        self.vlm_timeout_spin.setValue(
-            float(getattr(cfg, "vlm_timeout_s", 30) or 30)
-        )
+        self.vlm_timeout_spin.setValue(float(getattr(cfg, "vlm_timeout_s", 30) or 30))
         self.vlm_timeout_spin.valueChanged.connect(self._mark_dirty)
         self._add_form_label(form, "label.llm_timeout", self.vlm_timeout_spin)
 
@@ -1162,7 +1166,9 @@ class MainWindow(QMainWindow):
         self._add_form_label(form, "label.obs_port", self.obs_port_spin)
 
         self.obs_show_source_check = QCheckBox()
-        self.obs_show_source_check.setChecked(bool(getattr(cfg, "obs_show_source", False)))
+        self.obs_show_source_check.setChecked(
+            bool(getattr(cfg, "obs_show_source", False))
+        )
         self.obs_show_source_check.toggled.connect(self._on_obs_show_toggled)
         self.obs_show_translation_check = QCheckBox()
         self.obs_show_translation_check.setChecked(
@@ -1333,9 +1339,7 @@ class MainWindow(QMainWindow):
         self.result_history_spin.setAlignment(Qt.AlignmentFlag.AlignLeft)
         self.result_history_spin.setFixedWidth(72)
         self.result_history_spin.setValue(
-            clamp_result_history_lines(
-                getattr(self._cfg, "result_history_lines", 12)
-            )
+            clamp_result_history_lines(getattr(self._cfg, "result_history_lines", 12))
         )
         self.result_history_spin.valueChanged.connect(self._on_result_history_changed)
         head.addWidget(self.lbl_result_history)
@@ -1405,7 +1409,9 @@ class MainWindow(QMainWindow):
         self.btn_save.setToolTip(tr("tip.save"))
         self.btn_cancel.setText(tr("btn.cancel"))
         self.btn_cancel.setToolTip(tr("tip.cancel"))
-        self.settings_hint.setText(tr("hint.dirty") if dirty else tr("hint.apply_or_save"))
+        self.settings_hint.setText(
+            tr("hint.dirty") if dirty else tr("hint.apply_or_save")
+        )
 
         if hasattr(self, "detect_group"):
             self.detect_group.setTitle(tr("group.detect"))
@@ -1587,7 +1593,9 @@ class MainWindow(QMainWindow):
             self.base_url_edit.setText(cfg.base_url or "")
             self.set_model_text(cfg.model or "")
             self.prompt_edit.setText(cfg.custom_prompt or "")
-            self.context_spin.setValue(int(getattr(cfg, "context_history_size", 3) or 0))
+            self.context_spin.setValue(
+                int(getattr(cfg, "context_history_size", 3) or 0)
+            )
             self.max_tokens_spin.setValue(int(getattr(cfg, "max_tokens", 2048) or 2048))
             if hasattr(self, "timeout_spin"):
                 self.timeout_spin.setValue(
@@ -1602,9 +1610,7 @@ class MainWindow(QMainWindow):
                 self._sync_vlm_api_meta_from_provider(apply_defaults=False)
                 self.vlm_api_key_edit.setText(getattr(cfg, "vlm_api_key", "") or "")
                 self.vlm_base_url_edit.setText(getattr(cfg, "vlm_base_url", "") or "")
-                self.set_model_text(
-                    getattr(cfg, "vlm_model", "") or "", role="vlm"
-                )
+                self.set_model_text(getattr(cfg, "vlm_model", "") or "", role="vlm")
                 self.vlm_prompt_edit.setText(
                     getattr(cfg, "vlm_custom_prompt", "") or ""
                 )
@@ -1680,22 +1686,20 @@ class MainWindow(QMainWindow):
                 stable_ms = 0
             self.stable_ms_spin.setValue(max(0, stable_ms))
             self.interval_spin.setValue(int(cfg.monitor_interval_ms or 0))
-            self.cooldown_spin.setValue(int(getattr(cfg, "monitor_cooldown_ms", 1200) or 0))
+            self.cooldown_spin.setValue(
+                int(getattr(cfg, "monitor_cooldown_ms", 1200) or 0)
+            )
             self.threshold_spin.setValue(float(cfg.monitor_diff_threshold))
             from app.config import clamp_pipeline_buffer_size
 
             self.buffer_spin.setValue(
-                clamp_pipeline_buffer_size(
-                    getattr(cfg, "pipeline_buffer_size", 3)
-                )
+                clamp_pipeline_buffer_size(getattr(cfg, "pipeline_buffer_size", 3))
             )
             from app.config import clamp_result_history_lines
 
             if hasattr(self, "result_history_spin"):
                 self.result_history_spin.setValue(
-                    clamp_result_history_lines(
-                        getattr(cfg, "result_history_lines", 12)
-                    )
+                    clamp_result_history_lines(getattr(cfg, "result_history_lines", 12))
                 )
 
             # optional sampling
@@ -1710,9 +1714,13 @@ class MainWindow(QMainWindow):
                     spin.setValue(float(val))
 
             def _load_opt_int(chk, spin, val, default):
-                if val is None or (isinstance(val, int) and val <= 0 and spin is self.topk_spin):
+                if val is None or (
+                    isinstance(val, int) and val <= 0 and spin is self.topk_spin
+                ):
                     # top_k: None or 0 = unset
-                    if val is None or (spin is self.topk_spin and (val is None or int(val) <= 0)):
+                    if val is None or (
+                        spin is self.topk_spin and (val is None or int(val) <= 0)
+                    ):
                         chk.setChecked(False)
                         spin.setEnabled(False)
                         spin.setValue(default)
@@ -1726,8 +1734,12 @@ class MainWindow(QMainWindow):
                     spin.setEnabled(True)
                     spin.setValue(int(val))
 
-            _load_opt_float(self.temp_chk, self.temp_spin, getattr(cfg, "temperature", None), 0.2)
-            _load_opt_float(self.topp_chk, self.topp_spin, getattr(cfg, "top_p", None), 1.0)
+            _load_opt_float(
+                self.temp_chk, self.temp_spin, getattr(cfg, "temperature", None), 0.2
+            )
+            _load_opt_float(
+                self.topp_chk, self.topp_spin, getattr(cfg, "top_p", None), 1.0
+            )
             topk = getattr(cfg, "top_k", None)
             if topk is not None and int(topk) > 0:
                 self.topk_chk.setChecked(True)
@@ -1806,8 +1818,8 @@ class MainWindow(QMainWindow):
                     self.vlm_seed_spin.setEnabled(False)
                     self.vlm_seed_spin.setValue(0)
                 veffort = (
-                    getattr(cfg, "vlm_reasoning_effort", "") or ""
-                ).strip().lower()
+                    (getattr(cfg, "vlm_reasoning_effort", "") or "").strip().lower()
+                )
                 if veffort in ("none", "low", "medium", "high"):
                     self.vlm_reasoning_chk.setChecked(True)
                     self.vlm_reasoning_combo.setEnabled(True)
@@ -1904,8 +1916,7 @@ class MainWindow(QMainWindow):
             )
             c.vlm_top_k = (
                 int(self.vlm_topk_spin.value())
-                if self.vlm_topk_chk.isChecked()
-                and int(self.vlm_topk_spin.value()) > 0
+                if self.vlm_topk_chk.isChecked() and int(self.vlm_topk_spin.value()) > 0
                 else None
             )
             c.vlm_frequency_penalty = _optional_float_row(
@@ -1971,8 +1982,12 @@ class MainWindow(QMainWindow):
             else getattr(c, "result_history_lines", 12)
         )
 
-        c.temperature = _optional_float_row(enabled=self.temp_chk.isChecked(), spin=self.temp_spin)
-        c.top_p = _optional_float_row(enabled=self.topp_chk.isChecked(), spin=self.topp_spin)
+        c.temperature = _optional_float_row(
+            enabled=self.temp_chk.isChecked(), spin=self.temp_spin
+        )
+        c.top_p = _optional_float_row(
+            enabled=self.topp_chk.isChecked(), spin=self.topp_spin
+        )
         c.top_k = (
             int(self.topk_spin.value())
             if self.topk_chk.isChecked() and int(self.topk_spin.value()) > 0
@@ -1984,7 +1999,9 @@ class MainWindow(QMainWindow):
         c.presence_penalty = _optional_float_row(
             enabled=self.pp_chk.isChecked(), spin=self.pp_spin
         )
-        c.seed = _optional_int_row(enabled=self.seed_chk.isChecked(), spin=self.seed_spin)
+        c.seed = _optional_int_row(
+            enabled=self.seed_chk.isChecked(), spin=self.seed_spin
+        )
         if self.reasoning_chk.isChecked():
             c.reasoning_effort = str(self.reasoning_combo.currentData() or "none")
         else:
@@ -2479,7 +2496,9 @@ class MainWindow(QMainWindow):
         if self._obs_status_key == "on":
             self.obs_status_label.setText(tr("obs.status_on", url=self._obs_status_url))
         elif self._obs_status_key == "err":
-            self.obs_status_label.setText(tr("obs.status_err", err=self._obs_status_err))
+            self.obs_status_label.setText(
+                tr("obs.status_err", err=self._obs_status_err)
+            )
         else:
             self.obs_status_label.setText(tr("obs.status_off"))
 

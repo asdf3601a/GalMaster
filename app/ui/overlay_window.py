@@ -151,6 +151,7 @@ class OverlayWindow(QWidget):
 
     def apply_style(self, style: Any = None, **kwargs: Any) -> None:
         """Apply display/style options from AppConfig or a dict-like / kwargs."""
+
         def _get(name: str, default: Any) -> Any:
             if name in kwargs:
                 return kwargs[name]
@@ -394,7 +395,10 @@ class OverlayWindow(QWidget):
             if self._resize_edges and event.buttons() & Qt.MouseButton.LeftButton:
                 self._apply_resize(global_pos)
                 return True
-            if self._drag_pos is not None and event.buttons() & Qt.MouseButton.LeftButton:
+            if (
+                self._drag_pos is not None
+                and event.buttons() & Qt.MouseButton.LeftButton
+            ):
                 self.move(global_pos - self._drag_pos)
                 return True
             # Don't thrash cursor while user is selecting text
@@ -404,7 +408,10 @@ class OverlayWindow(QWidget):
                 self._update_hover_cursor(pos)
             return False
 
-        if et == QEvent.Type.MouseButtonPress and event.button() == Qt.MouseButton.LeftButton:
+        if (
+            et == QEvent.Type.MouseButtonPress
+            and event.button() == Qt.MouseButton.LeftButton
+        ):
             if not self.rect().contains(pos):
                 return False
             edges = self._hit_edges(pos)
@@ -431,8 +438,15 @@ class OverlayWindow(QWidget):
                 return True
             return False
 
-        if et == QEvent.Type.MouseButtonRelease and event.button() == Qt.MouseButton.LeftButton:
-            if self._drag_pos is None and not self._resize_edges and self._geo_at_press is None:
+        if (
+            et == QEvent.Type.MouseButtonRelease
+            and event.button() == Qt.MouseButton.LeftButton
+        ):
+            if (
+                self._drag_pos is None
+                and not self._resize_edges
+                and self._geo_at_press is None
+            ):
                 return False
             moved = (
                 self._geo_at_press is not None and self.geometry() != self._geo_at_press
@@ -515,8 +529,7 @@ class OverlayWindow(QWidget):
     def mouseReleaseEvent(self, event) -> None:  # noqa: N802
         if event.button() == Qt.MouseButton.LeftButton and not self._click_through:
             moved = (
-                self._geo_at_press is not None
-                and self.geometry() != self._geo_at_press
+                self._geo_at_press is not None and self.geometry() != self._geo_at_press
             )
             if self._drag_pos is not None or self._resize_edges or self._geo_at_press:
                 self._drag_pos = None

@@ -5,14 +5,16 @@ Capture is owned by AppController / CaptureStage; jobs must include a pre-grabbe
 
 from __future__ import annotations
 
+import io
+import time
 from collections import deque
-from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout
+from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FuturesTimeout
 from copy import deepcopy
 from dataclasses import dataclass
 from hashlib import sha1
-import io
-import time
-from typing import Callable, TypeVar
+from typing import TypeVar
 
 from PIL import Image
 from PySide6.QtCore import QObject, Qt, QThread, Signal
@@ -104,7 +106,9 @@ class _Worker(QObject):
         self._generation = 0
         self._breaker = _CircuitBreaker()
         # One pool for deadline-wrapped LLM calls (orphan threads die with process)
-        self._llm_pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="llm-call")
+        self._llm_pool = ThreadPoolExecutor(
+            max_workers=2, thread_name_prefix="llm-call"
+        )
 
     def request_abort(self) -> None:
         self._abort = True
@@ -119,9 +123,7 @@ class _Worker(QObject):
             img = job.image
             force = job.force
         else:
-            self.finished.emit(
-                PipelineResult("", "", error=tr("pipe.invalid_job"))
-            )
+            self.finished.emit(PipelineResult("", "", error=tr("pipe.invalid_job")))
             return
 
         # Honour abort set before this job started (e.g. shutdown).
@@ -140,9 +142,7 @@ class _Worker(QObject):
         try:
             if img is None:
                 # Capture is a separate stage; Process never grabs the screen.
-                self.finished.emit(
-                    PipelineResult("", "", error=tr("pipe.no_image"))
-                )
+                self.finished.emit(PipelineResult("", "", error=tr("pipe.no_image")))
                 return
 
             if self._abort or gen != self._generation:
@@ -166,9 +166,7 @@ class _Worker(QObject):
                         "",
                         "",
                         skipped=True,
-                        status_message=tr(
-                            "pipe.blank", info=describe_image(img)
-                        ),
+                        status_message=tr("pipe.blank", info=describe_image(img)),
                     )
                 )
                 return
@@ -248,9 +246,7 @@ class _Worker(QObject):
                     "",
                     "",
                     skipped=True,
-                    status_message=tr(
-                        "pipe.ocr_empty", info=describe_image(img)
-                    ),
+                    status_message=tr("pipe.ocr_empty", info=describe_image(img)),
                 )
             )
             return
@@ -341,9 +337,7 @@ class _Worker(QObject):
     ) -> None:
         vlm_ep = cfg.vlm_endpoint()
         if not vlm_ep.has_key:
-            self.finished.emit(
-                PipelineResult("", "", error=tr("pipe.vlm_need_key"))
-            )
+            self.finished.emit(PipelineResult("", "", error=tr("pipe.vlm_need_key")))
             return
 
         img_fp = self._image_fingerprint(img)
@@ -422,9 +416,7 @@ class _Worker(QObject):
             return
         if not (translated or "").strip() and not (source or "").strip():
             self._last_image_fp = img_fp
-            self.finished.emit(
-                PipelineResult("", "", error=tr("pipe.vlm_empty"))
-            )
+            self.finished.emit(PipelineResult("", "", error=tr("pipe.vlm_empty")))
             return
         if not (translated or "").strip() and (source or "").strip():
             translated = source  # model only returned source
@@ -507,9 +499,7 @@ class _Worker(QObject):
                     "",
                     "",
                     skipped=True,
-                    status_message=tr(
-                        "pipe.ocr_empty", info=describe_image(img)
-                    ),
+                    status_message=tr("pipe.ocr_empty", info=describe_image(img)),
                 )
             )
             return
