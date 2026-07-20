@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import ctypes
 import os
-import sys
 from ctypes import (
     POINTER,
     Structure,
@@ -76,9 +75,7 @@ def main() -> int:
     )
     GetOcrLineCount = bind(oneocr, "GetOcrLineCount", [c_int64, POINTER(c_int64)])
     GetOcrLine = bind(oneocr, "GetOcrLine", [c_int64, c_int64, POINTER(c_int64)])
-    GetOcrLineContent = bind(
-        oneocr, "GetOcrLineContent", [c_int64, POINTER(c_int64)]
-    )
+    GetOcrLineContent = bind(oneocr, "GetOcrLineContent", [c_int64, POINTER(c_int64)])
 
     ctx = c_int64(0)
     assert CreateOcrInitOptions(byref(ctx)) == 0

@@ -32,9 +32,10 @@ uv run galmaster
 uv run pytest -q
 uv run python scripts/smoke_headless.py
 
-# 格式化 / 靜態檢查（Ruff）
-uv run ruff format app tests
-uv run ruff check app tests
+# 格式化 / 靜態檢查（Ruff；合併前請通過，尚未接 CI）
+uv run ruff format app tests scripts
+uv run ruff format --check app tests scripts
+uv run ruff check app tests scripts
 ```
 
 開發與 agent 約定見 [AGENTS.md](AGENTS.md)。

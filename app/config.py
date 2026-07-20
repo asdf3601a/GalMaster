@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import contextlib
 import json
 import os
 import sys
@@ -765,10 +766,8 @@ def load_config(path: Path | None = None) -> AppConfig:
         migrated = _read_json_config(legacy)
         if migrated is not None:
             cfg = migrated
-            try:
+            with contextlib.suppress(OSError):
                 save_config(cfg, cfg_path)
-            except OSError:
-                pass
 
     if cfg is None:
         cfg = AppConfig()

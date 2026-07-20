@@ -27,11 +27,9 @@ def main() -> int:
     # Prefer Japanese if font supports; fallback English
     try:
         draw.text((16, 40), sample, fill=(0, 0, 0), font=font)
-        expected_hint = "日文"
     except Exception:
         sample = "GOOD MORNING"
         draw.text((16, 40), sample, fill=(0, 0, 0), font=font)
-        expected_hint = "英文"
 
     # Always also draw English line for OCR reliability
     draw.rectangle((0, 0, 520, 140), fill=(255, 255, 255))

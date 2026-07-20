@@ -5,6 +5,7 @@ Capture is owned by AppController / CaptureStage; jobs must include a pre-grabbe
 
 from __future__ import annotations
 
+import contextlib
 import io
 import time
 from collections import deque
@@ -154,10 +155,8 @@ class _Worker(QObject):
                 return
 
             self.progress.emit(tr("pipe.prep_image", info=describe_image(img)))
-            try:
+            with contextlib.suppress(Exception):
                 self.preview_ready.emit(make_preview_image(img))
-            except Exception:
-                pass
 
             if is_mostly_blank(img):
                 # Status only — keep last overlay / result panel content
@@ -751,7 +750,5 @@ class TranslationPipeline(QObject):
         self._thread.quit()
         if not self._thread.wait(1000):
             pass
-        try:
+        with contextlib.suppress(Exception):
             self._worker._llm_pool.shutdown(wait=False, cancel_futures=True)
-        except Exception:
-            pass

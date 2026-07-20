@@ -7,6 +7,7 @@ Capture policy (aligned with OBS Window Capture Automatic):
 
 from __future__ import annotations
 
+import contextlib
 import ctypes
 from ctypes import wintypes
 from typing import TYPE_CHECKING
@@ -125,10 +126,8 @@ def _capture_gdi_desktop(
             1,
         ).copy()
     finally:
-        try:
+        with contextlib.suppress(Exception):
             win32gui.DeleteObject(bitmap.GetHandle())
-        except Exception:
-            pass
         save_dc.DeleteDC()
         mfc_dc.DeleteDC()
         win32gui.ReleaseDC(hdesktop, hwnd_dc)

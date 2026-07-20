@@ -30,14 +30,15 @@ uv run galmaster
 # 測試
 uv run pytest -q
 
-# 格式化 / 靜態檢查（權威工具：Ruff）
-uv run ruff format app tests
-uv run ruff format --check app tests
-uv run ruff check app tests
-uv run ruff check app tests --fix
+# 格式化 / 靜態檢查（權威工具：Ruff；涵蓋 app / tests / scripts）
+uv run ruff format app tests scripts
+uv run ruff format --check app tests scripts
+uv run ruff check app tests scripts
+uv run ruff check app tests scripts --fix
 ```
 
-提交前邏輯變更至少跑 `uv run pytest -q`；格式與 lint 應通過 `ruff format --check` 與 `ruff check`。
+提交前邏輯變更至少跑 `uv run pytest -q`。  
+**品質閘門（人工，尚未接 CI / pre-commit）：** `ruff format --check` 與 `ruff check` 必須通過；不要靠擴充 `ignore` 掩蓋新問題——有合理例外再逐條寫進 `pyproject.toml` 並註解原因。
 
 ## 目錄與模組邊界
 
@@ -92,11 +93,13 @@ Detect (RegionMonitor)
 ## 程式風格
 
 - **Ruff 是格式與 lint 的權威**；不要為了個人風格對抗 formatter。
-- 設定在 `pyproject.toml` 的 `[tool.ruff]` / `[tool.ruff.lint]` / `[tool.ruff.format]`。
+- 設定在 `pyproject.toml` 的 `[tool.ruff]` / `[tool.ruff.lint]` / `[tool.ruff.format]`；範圍含 `app`、`tests`、`scripts`。
 - 慣例：`from __future__ import annotations`、型別註解、模組內聚。
 - 使用者可見字串走 `app/i18n`（`zh-Hant.json` / `en.json`），新增 UI 文案請補雙語 key。
-- 刻意的 soft-fail（`try` / `except Exception: pass` 在 UI／Win32 邊界）已列入 Ruff ignore（如 `SIM105`）；不要為了「消 warning」改寫錯誤處理語意，除非是真 bug。
+- 邊界 soft-fail 使用 `contextlib.suppress(...)`（不要散落 `try/except/pass`）。
+- Qt 樣式名稱請 `list(QStyleFactory.keys())` 再做 membership（`keys()` 不是 `dict.keys()`）。
 - 新增第三方套件須寫進 `pyproject.toml` 並 `uv lock`；Windows 專用擷取／OCR 路徑是設計一部分，未經要求不要「抽象掉 Win32／WGC」。
+- Qt 測試共用 `tests/conftest.py` 的 session 級 `qapp`（`QApplication`）；不要另建 `QCoreApplication`。
 
 ## 設定與機密
 

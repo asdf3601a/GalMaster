@@ -50,7 +50,7 @@ pythonpath = ["."]
 [tool.ruff]
 target-version = "py312"
 line-length = 88
-src = ["app", "tests"]
+src = ["app", "tests", "scripts"]
 extend-exclude = [
     ".venv",
     "models",
@@ -69,13 +69,7 @@ select = [
     "SIM", # flake8-simplify
 ]
 ignore = [
-    "E501",   # line length owned by formatter
-    "SIM105", # intentional soft-fail try/except pass (Qt / Win32 paths)
-    "SIM102", # nested ifs often clearer with stage comments
-    "SIM103", # prefer explicit early returns over inverted one-liners
-    "SIM118", # Qt APIs (e.g. QStyleFactory.keys()) are not dict.keys()
-    "UP042",  # keep str, Enum until StrEnum migration is intentional
-    "UP047",  # keep TypeVar generics until PEP 695 migration is intentional
+    "E501", # line length owned by the formatter
 ]
 
 [tool.ruff.lint.isort]

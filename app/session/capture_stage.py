@@ -7,10 +7,10 @@ This module only answers: is a grab in flight, and what should run next?
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from enum import Enum
+from enum import StrEnum
 
 
-class CapturePhase(str, Enum):
+class CapturePhase(StrEnum):
     IDLE = "idle"
     CAPTURING = "capturing"
 

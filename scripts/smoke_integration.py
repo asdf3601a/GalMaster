@@ -100,7 +100,9 @@ def main() -> int:
     def on_done(r: object) -> None:
         assert isinstance(r, PipelineResult)
         results.append(r)
-        log(f"[pipeline] source={r.source_text!r} err={r.error!r} tr={r.translated_text!r}")
+        log(
+            f"[pipeline] source={r.source_text!r} err={r.error!r} tr={r.translated_text!r}"
+        )
         pipe.shutdown()
         main_win.force_close()
         overlay.close()

@@ -3,14 +3,12 @@
 from __future__ import annotations
 
 from collections import deque
-from typing import Any, TypeVar
+from typing import Any
 
 from app.config import (
     PIPELINE_BUFFER_DEFAULT,
     clamp_pipeline_buffer_size,
 )
-
-T = TypeVar("T")
 
 
 def buffer_cap(value: Any) -> int:
@@ -20,7 +18,7 @@ def buffer_cap(value: Any) -> int:
     return clamp_pipeline_buffer_size(value)
 
 
-def enqueue_job(
+def enqueue_job[T](
     queue: deque[T],
     job: T,
     *,

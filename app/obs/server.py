@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import threading
 import time
@@ -431,10 +432,8 @@ class ObsSubtitleServer:
         self._httpd = httpd
 
         def _run() -> None:
-            try:
+            with contextlib.suppress(Exception):
                 httpd.serve_forever(poll_interval=0.5)
-            except Exception:
-                pass
 
         t = threading.Thread(target=_run, name="ObsSubtitleServer", daemon=True)
         self._thread = t
@@ -444,14 +443,10 @@ class ObsSubtitleServer:
         httpd = self._httpd
         self._httpd = None
         if httpd is not None:
-            try:
+            with contextlib.suppress(Exception):
                 httpd.shutdown()
-            except Exception:
-                pass
-            try:
+            with contextlib.suppress(Exception):
                 httpd.server_close()
-            except Exception:
-                pass
         with self._lock:
             for ev in list(self._subscribers):
                 ev.set()

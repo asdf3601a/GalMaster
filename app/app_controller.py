@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import threading
 from copy import deepcopy
 
@@ -372,10 +373,8 @@ class AppController(QObject):
             self.main.set_monitor_running(running)
             # Sync applied snapshot monitor fields (operational, not draft dirty)
             self.main.sync_operational_monitor(self.cfg)
-            try:
+            with contextlib.suppress(Exception):
                 self.persist()
-            except Exception:
-                pass
             if not running:
                 self.main.set_status(tr("status.monitor_start_failed"), busy=False)
                 return
@@ -389,16 +388,12 @@ class AppController(QObject):
             self.cfg.auto_monitor = False
             self.monitor.stop(wait=0.15)
             self.capture_stage.reset_deferred()
-            try:
+            with contextlib.suppress(Exception):
                 self.pipeline.clear_auto_queue()
-            except Exception:
-                pass
             self.main.set_monitor_running(False)
             self.main.sync_operational_monitor(self.cfg)
-            try:
+            with contextlib.suppress(Exception):
                 self.persist()
-            except Exception:
-                pass
             self.main.set_status(tr("status.monitor_off"), busy=False)
 
     def _register_hotkey(self) -> None:
@@ -416,10 +411,8 @@ class AppController(QObject):
         """
         if not self.cfg.has_region and not self.cfg.has_abs_region:
             self.main.set_status(tr("status.need_region"), busy=False)
-            try:
+            with contextlib.suppress(Exception):
                 self.overlay.set_status(tr("status.error"))
-            except Exception:
-                pass
             return False
 
         if self.cfg.bound_hwnd and not is_window_valid(self.cfg.bound_hwnd):
@@ -435,16 +428,12 @@ class AppController(QObject):
                     self.cfg.region_abs_h,
                 )
                 self.main.set_region_info(self.cfg)
-                try:
+                with contextlib.suppress(Exception):
                     self.persist()
-                except Exception:
-                    pass
             else:
                 self.main.set_status(tr("status.hwnd_stale"), busy=False)
-                try:
+                with contextlib.suppress(Exception):
                     self.overlay.set_status(tr("status.error"))
-                except Exception:
-                    pass
                 return False
         return True
 
@@ -507,10 +496,8 @@ class AppController(QObject):
     def _capture_may_use_screen(self) -> bool:
         """True when capture path is likely display/mss (overlay can appear in shot)."""
         hwnd = int(getattr(self.cfg, "bound_hwnd", 0) or 0)
-        if hwnd and is_window_valid(hwnd):
-            # Window capture primary — overlay is a different top-level HWND
-            return False
-        return True
+        # Window capture primary — overlay is a different top-level HWND
+        return not (hwnd and is_window_valid(hwnd))
 
     def _overlay_may_cover_region(self) -> bool:
         """True when overlay geometry likely intersects the OCR capture rect."""
@@ -581,10 +568,8 @@ class AppController(QObject):
         if err is not None:
             # Status only — keep last overlay / result text (same as empty-OCR soft path)
             self.main.set_status(tr("status.capture_failed", err=err), busy=False)
-            try:
+            with contextlib.suppress(Exception):
                 self.overlay.set_status(tr("status.error"))
-            except Exception:
-                pass
             # Still pump deferred captures after a failed grab
             self._capture_pump_deferred()
             return
@@ -608,10 +593,8 @@ class AppController(QObject):
             self._start_capture(force=False)
 
     def on_preview_ready(self, img: object) -> None:
-        try:
+        with contextlib.suppress(Exception):
             self.main.set_preview_image(img)  # type: ignore[arg-type]
-        except Exception:
-            pass
 
     def _sync_obs_server(self, cfg: AppConfig) -> None:
         def _i(name: str, default: int) -> int:
@@ -756,10 +739,8 @@ class AppController(QObject):
             self._present(result)
         except Exception as exc:
             # Never leave the UI stuck busy / unresponsive after a result.
-            try:
+            with contextlib.suppress(Exception):
                 self.main.set_status(tr("pipe.error", err=str(exc)), busy=False)
-            except Exception:
-                pass
 
     def _present(self, result: PipelineResult) -> None:
         """Present stage: apply Process result to main UI / Overlay / OBS."""
@@ -772,9 +753,10 @@ class AppController(QObject):
             return
 
         # Show results on overlay when it is open, or was open when capture started
-        if self.capture_stage.overlay_was_visible or self.overlay.isVisible():
-            if not self.overlay.isVisible():
-                self.overlay.show()
+        if (
+            self.capture_stage.overlay_was_visible or self.overlay.isVisible()
+        ) and not self.overlay.isVisible():
+            self.overlay.show()
 
         # Hard error with no source: status + do NOT wipe last good overlay/result
         # (user can still read the previous translation while diagnosing the fault)
@@ -799,14 +781,12 @@ class AppController(QObject):
                 show=False,
             )
             # Keep stream in sync with soft failure (source + error as translation)
-            try:
+            with contextlib.suppress(Exception):
                 self.obs.publish(
                     source=result.source_text,
                     translation=result.error,
                     status="error",
                 )
-            except Exception:
-                pass
             return
 
         if result.ocr_only:
@@ -824,14 +804,12 @@ class AppController(QObject):
                 status=tr("pipe.ocr_only_status"),
                 show=False,
             )
-            try:
+            with contextlib.suppress(Exception):
                 self.obs.publish(
                     source=result.source_text,
                     translation=result.source_text,
                     status="ocr_only",
                 )
-            except Exception:
-                pass
             return
 
         cache_tag = tr("pipe.cache_tag") if result.from_cache else ""
@@ -849,14 +827,12 @@ class AppController(QObject):
             status=tr("pipe.done") + cache_tag,
             show=False,
         )
-        try:
+        with contextlib.suppress(Exception):
             self.obs.publish(
                 source=result.source_text,
                 translation=result.translated_text,
                 status="ok" + ("_cache" if result.from_cache else ""),
             )
-        except Exception:
-            pass
 
     @staticmethod
     def _format_result_line(
@@ -899,28 +875,18 @@ class AppController(QObject):
         if getattr(self, "_shutting_down", False):
             return
         self._shutting_down = True
-        try:
+        with contextlib.suppress(Exception):
             # Persist applied cfg + geometry (not unapplied dirty form fields)
             self.persist()
-        except Exception:
-            pass
-        try:
+        with contextlib.suppress(Exception):
             self.monitor.stop()
-        except Exception:
-            pass
-        try:
+        with contextlib.suppress(Exception):
             self.hotkey.unregister()
             self.app.removeNativeEventFilter(self.hotkey)
-        except Exception:
-            pass
-        try:
+        with contextlib.suppress(Exception):
             self.pipeline.shutdown()
-        except Exception:
-            pass
-        try:
+        with contextlib.suppress(Exception):
             self.obs.stop()
-        except Exception:
-            pass
         self.tray.hide()
         self.overlay.hide()
         self.main.hide()

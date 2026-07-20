@@ -116,7 +116,7 @@ def _match_qt_screens_to_mss() -> list[tuple[object, dict]] | None:
         return None
     q_sorted = sorted(screens, key=lambda s: (s.geometry().left(), s.geometry().top()))
     m_sorted = sorted(mons, key=lambda m: (int(m["left"]), int(m["top"])))
-    return list(zip(q_sorted, m_sorted, strict=False))
+    return list(zip(q_sorted, m_sorted, strict=True))
 
 
 def _screen_at_logical(x: int, y: int):

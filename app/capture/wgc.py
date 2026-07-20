@@ -9,6 +9,7 @@ or the target HWND cannot be captured — callers fall back to GDI/screen.
 
 from __future__ import annotations
 
+import contextlib
 import threading
 
 from PIL import Image
@@ -82,10 +83,8 @@ def _capture_once(
 
     def on_frame_arrived(frame: Frame, capture_control: InternalCaptureControl) -> None:
         if cancelled["v"]:
-            try:
+            with contextlib.suppress(Exception):
                 capture_control.stop()
-            except Exception:
-                pass
             done.set()
             return
         try:
@@ -100,10 +99,8 @@ def _capture_once(
             if not cancelled["v"]:
                 result["img"] = None
         finally:
-            try:
+            with contextlib.suppress(Exception):
                 capture_control.stop()
-            except Exception:
-                pass
             done.set()
 
     def on_closed() -> None:

@@ -6,6 +6,7 @@ Fallback: PP-OCRv4 ONNX via RapidOCR (same PaddleOCR model family; no paddle DLL
 
 from __future__ import annotations
 
+import contextlib
 import os
 from pathlib import Path
 
@@ -47,10 +48,8 @@ def _add_dll_dir(libs: Path) -> None:
     os.environ["PATH"] = libs_s + os.pathsep + os.environ.get("PATH", "")
     os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
     if hasattr(os, "add_dll_directory"):
-        try:
+        with contextlib.suppress(OSError):
             os.add_dll_directory(libs_s)
-        except OSError:
-            pass
 
 
 def _extract_native_texts(result) -> list[str]:

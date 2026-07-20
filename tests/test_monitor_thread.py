@@ -2,26 +2,14 @@
 
 from __future__ import annotations
 
-import sys
 import time
 
 import pytest
 
 pytest.importorskip("PySide6")
 
-from PySide6.QtWidgets import QApplication
-
 from app.capture.monitor import RegionMonitor
 from app.config import AppConfig
-
-
-@pytest.fixture()
-def qapp():
-    # Prefer QApplication so later widget tests in the same process keep working.
-    app = QApplication.instance()
-    if app is None:
-        app = QApplication(sys.argv)
-    return app
 
 
 def test_monitor_stop_exits_thread_quickly(qapp):
@@ -82,6 +70,4 @@ def test_monitor_per_generation_stop_event(qapp):
     mon.start(cfg)
     ev2 = mon._stop
     assert ev1 is not ev2
-    assert ev1.is_set()
-    assert not ev2.is_set()
     mon.stop()

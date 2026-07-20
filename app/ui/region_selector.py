@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import contextlib
+
 from PySide6.QtCore import QPoint, QRect, Qt, Signal
 from PySide6.QtGui import QColor, QGuiApplication, QPainter, QPen
 from PySide6.QtWidgets import QWidget
@@ -114,12 +116,8 @@ class RegionSelector(QWidget):
             self.cancelled.emit()
 
     def _finish(self) -> None:
-        try:
+        with contextlib.suppress(Exception):
             self.releaseKeyboard()
-        except Exception:
-            pass
-        try:
+        with contextlib.suppress(Exception):
             self.releaseMouse()
-        except Exception:
-            pass
         self.hide()

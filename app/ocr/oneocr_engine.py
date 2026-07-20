@@ -21,6 +21,7 @@ relative-path I/O elsewhere in the app must use project_root() / absolute paths.
 
 from __future__ import annotations
 
+import contextlib
 import ctypes
 import os
 import shutil
@@ -315,10 +316,8 @@ class OneOCREngine:
         with self._lock:
             # Ensure native deps still resolve if something else changed DLL dir
             if self._set_dll_dir is not None:
-                try:
+                with contextlib.suppress(Exception):
                     self._set_dll_dir(str(self._dir))
-                except Exception:
-                    pass
             try:
                 if os.getcwd() != str(self._dir):
                     os.chdir(self._dir)
@@ -353,10 +352,8 @@ class OneOCREngine:
                         lines.append(s)
                 return "\n".join(lines).strip()
             finally:
-                try:
+                with contextlib.suppress(Exception):
                     self._ReleaseOcrResult(instance)
-                except Exception:
-                    pass
 
     def close(self) -> None:
         with self._lock:
@@ -384,14 +381,10 @@ class OneOCREngine:
             except Exception:
                 pass
             if self._dll_dir_set and self._set_dll_dir is not None:
-                try:
+                with contextlib.suppress(Exception):
                     self._set_dll_dir(None)
-                except Exception:
-                    pass
                 self._dll_dir_set = False
 
     def __del__(self) -> None:
-        try:
+        with contextlib.suppress(Exception):
             self.close()
-        except Exception:
-            pass

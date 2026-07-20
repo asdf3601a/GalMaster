@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import sys
 
 
@@ -13,12 +14,10 @@ def main() -> int:
     from PySide6.QtCore import Qt
     from PySide6.QtWidgets import QApplication, QStyleFactory
 
-    try:
+    with contextlib.suppress(Exception):
         QApplication.setHighDpiScaleFactorRoundingPolicy(
             Qt.HighDpiScaleFactorRoundingPolicy.PassThrough
         )
-    except Exception:
-        pass
 
     from app.app_controller import AppController
     from app.ui.styles import MAIN_STYLE, apply_dark_palette
@@ -29,7 +28,9 @@ def main() -> int:
 
     # windows11/vista native styles break QSS combo/spin arrows (empty strips).
     # Fusion + explicit QSS indicators is the reliable dark-UI path on Windows.
-    if "Fusion" in QStyleFactory.keys():
+    # QStyleFactory.keys() is a Qt API (not dict.keys()); materialize for membership.
+    style_names = list(QStyleFactory.keys())
+    if "Fusion" in style_names:
         app.setStyle("Fusion")
     apply_dark_palette(app)
     app.setStyleSheet(MAIN_STYLE)

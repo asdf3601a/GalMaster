@@ -1714,18 +1714,11 @@ class MainWindow(QMainWindow):
                     spin.setValue(float(val))
 
             def _load_opt_int(chk, spin, val, default):
-                if val is None or (
-                    isinstance(val, int) and val <= 0 and spin is self.topk_spin
-                ):
-                    # top_k: None or 0 = unset
-                    if val is None or (
-                        spin is self.topk_spin and (val is None or int(val) <= 0)
-                    ):
-                        chk.setChecked(False)
-                        spin.setEnabled(False)
-                        spin.setValue(default)
-                        return
-                if val is None:
+                # top_k: None or 0 = unset; other ints use None-only for unset
+                topk_unset = spin is self.topk_spin and (
+                    val is None or (isinstance(val, int) and int(val) <= 0)
+                )
+                if val is None or topk_unset:
                     chk.setChecked(False)
                     spin.setEnabled(False)
                     spin.setValue(default)
